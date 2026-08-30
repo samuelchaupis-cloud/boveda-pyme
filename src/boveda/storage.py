@@ -1,5 +1,7 @@
 import logging
+import os
 
+import aioboto3
 from botocore.exceptions import ClientError, EndpointConnectionError
 from tenacity import (
     retry,
@@ -54,3 +56,26 @@ def cleanup_in_progress_snapshots(session, s3_client, bucket: str):
         snap.estado = "FAILED"
         snap.error_detail = "Proceso interrumpido abruptamente (crash/OOM kill previo)"
     session.commit()
+
+
+async def upload_to_s3(payload: bytes, bucket: str, key: str):
+    session = aioboto3.Session()
+    async with session.client("s3", endpoint_url=os.getenv("S3_ENDPOINT")) as s3:
+        await s3.put_object(Bucket=bucket, Key=key, Body=payload)
+
+
+async def delete_objects_s3(bucket: str, keys: list[str]):
+    session = aioboto3.Session()
+    async with session.client("s3", endpoint_url=os.getenv("S3_ENDPOINT")) as s3:
+        for i in range(0, len(keys), 1000):
+            batch = keys[i : i + 1000]
+            objects = [{"Key": k} for k in batch]
+            await s3.delete_objects(Bucket=bucket, Delete={"Objects": objects})
+
+
+async def download_from_s3(bucket: str, key: str) -> bytes:
+    session = aioboto3.Session()
+    async with session.client("s3", endpoint_url=os.getenv("S3_ENDPOINT")) as s3:
+        response = await s3.get_object(Bucket=bucket, Key=key)
+        # response["Body"] is an aiobotocore.response.StreamingBody
+        return await response["Body"].read()

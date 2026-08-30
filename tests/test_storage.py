@@ -1,4 +1,5 @@
 import os
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from botocore.exceptions import ClientError
@@ -87,3 +88,67 @@ def test_cleanup_in_progress_snapshots(db_session):
     # Ambos deben estar FAILED
     assert db_session.query(Snapshot).get("snap-stale-1").estado == "FAILED"
     assert db_session.query(Snapshot).get("snap-stale-2").estado == "FAILED"
+
+
+@pytest.mark.asyncio
+@patch("aioboto3.Session")
+async def test_upload_to_s3(mock_session_cls):
+    from boveda.storage import upload_to_s3
+
+    mock_client = AsyncMock()
+    mock_session_instance = mock_session_cls.return_value
+    mock_session_instance.client.return_value.__aenter__.return_value = mock_client
+
+    await upload_to_s3(b"payload", "my-bucket", "my-key")
+
+    mock_client.put_object.assert_called_once_with(
+        Bucket="my-bucket", Key="my-key", Body=b"payload"
+    )
+
+
+@pytest.mark.asyncio
+@patch("aioboto3.Session")
+async def test_delete_objects_s3(mock_session_cls):
+    from boveda.storage import delete_objects_s3
+
+    mock_client = AsyncMock()
+    mock_session_instance = mock_session_cls.return_value
+    mock_session_instance.client.return_value.__aenter__.return_value = mock_client
+
+    keys = [f"key-{i}" for i in range(1500)]
+    await delete_objects_s3("my-bucket", keys)
+
+    assert mock_client.delete_objects.call_count == 2
+    # First batch
+    call1_args = mock_client.delete_objects.call_args_list[0][1]
+    assert call1_args["Bucket"] == "my-bucket"
+    assert len(call1_args["Delete"]["Objects"]) == 1000
+
+    # Second batch
+    call2_args = mock_client.delete_objects.call_args_list[1][1]
+    assert call2_args["Bucket"] == "my-bucket"
+    assert len(call2_args["Delete"]["Objects"]) == 500
+
+
+@pytest.mark.asyncio
+@patch("aioboto3.Session")
+async def test_download_from_s3(mock_session_cls):
+    from boveda.storage import download_from_s3
+
+    mock_client = AsyncMock()
+
+    # Mocking the response["Body"].read() logic
+    mock_body = AsyncMock()
+    mock_body.read.return_value = b"downloaded_payload"
+    mock_response = {"Body": mock_body}
+
+    mock_client.get_object.return_value = mock_response
+
+    mock_session_instance = mock_session_cls.return_value
+    mock_session_instance.client.return_value.__aenter__.return_value = mock_client
+
+    result = await download_from_s3("my-bucket", "my-key")
+
+    assert result == b"downloaded_payload"
+    mock_client.get_object.assert_called_once_with(Bucket="my-bucket", Key="my-key")
+    mock_body.read.assert_awaited_once()
