@@ -1,6 +1,8 @@
 import logging
 from datetime import datetime, timedelta
 
+import dateutil.relativedelta
+
 from boveda.database import Bloque, Snapshot
 
 log = logging.getLogger(__name__)
@@ -16,8 +18,7 @@ def classify_snapshots(snapshots: list[Snapshot], now: datetime) -> list[Snapsho
     # Monthly
     for month_offset in range(RETENTION_MONTHLY):
         # We need the target month
-        # Simplistic approach: subtract 30 days * offset
-        target = now - timedelta(days=30 * month_offset)
+        target = now - dateutil.relativedelta.relativedelta(months=month_offset)
         # Find all snapshots in that month/year
         in_month = [
             s
@@ -52,11 +53,7 @@ def classify_snapshots(snapshots: list[Snapshot], now: datetime) -> list[Snapsho
     return [s for s in snapshots if s.id not in protected and s.estado == "COMPLETED"]
 
 
-class PurgeVerificationError(Exception):
-    pass
-
-
-def purge_expired_snapshots(session, delete_object_callback, object_exists_callback):
+def purge_expired_snapshots(session, delete_objects_callback):
     expired = session.query(Snapshot).filter(Snapshot.estado == "EXPIRED").all()
 
     for snap in expired:
@@ -65,20 +62,16 @@ def purge_expired_snapshots(session, delete_object_callback, object_exists_callb
 
         try:
             bloques = session.query(Bloque).filter(Bloque.snapshot_id == snap.id).all()
-            for bloque in bloques:
-                delete_object_callback(bloque.storage_key)
 
-            for bloque in bloques:
-                if object_exists_callback(bloque.storage_key):
-                    raise PurgeVerificationError(
-                        f"Objeto {bloque.storage_key} aún existe"
-                    )
+            keys_list = [bloque.storage_key for bloque in bloques]
+            if keys_list:
+                delete_objects_callback(keys_list)
 
             session.query(Bloque).filter(Bloque.snapshot_id == snap.id).delete()
             session.delete(snap)
             session.commit()
 
-        except Exception as e: # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
             session.rollback()
             # Fetch again since rollback detaches
             snap = session.query(Snapshot).get(snap.id)

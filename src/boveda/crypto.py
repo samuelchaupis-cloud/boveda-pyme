@@ -104,10 +104,9 @@ def parse_chunk_header(header: bytes) -> tuple[int, bytes, int]:
     return chunk_seq, nonce, ciphertext_len
 
 
-def create_aad(chunk_seq: int, snapshot_id: str) -> bytes:
-    """magic ‖ version ‖ chunk_seq ‖ snapshot_id"""
-    magic = b"BVPM"
-    version = 1
-    # 4 bytes magic, 2 bytes version, 4 bytes chunk_seq + snapshot_id
-    base = struct.pack(">4sHI", magic, version, chunk_seq)
-    return base + snapshot_id.encode("utf-8")
+def create_aad(header: bytes, snapshot_id: str) -> bytes:
+    """
+    Construye el AAD usando todo el header binario de 26 bytes
+    más el snapshot_id (aislamiento temporal).
+    """
+    return header + snapshot_id.encode("utf-8")

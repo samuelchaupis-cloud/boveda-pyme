@@ -21,7 +21,7 @@ async def test_subprocess_exit_code():
     # Como es windows, usaremos pwsh -Command "exit 1"
     cmd = ["pwsh", "-Command", "Write-Error 'Fallo intencional'; exit 1"]
 
-    with pytest.raises(SubprocessError, match="terminó con código 1"):
+    with pytest.raises(SubprocessError, match="terminó con error 1"):
         await read_source(cmd, queue, shutdown_event)
 
 
@@ -94,7 +94,7 @@ async def test_pipeline_roundtrip():
         assert c_seq == seq
 
         ciphertext = payload[26:]
-        aad = create_aad(seq, snapshot_id)
+        aad = create_aad(header, snapshot_id)
 
         compressed = aesgcm.decrypt(nonce, ciphertext, aad)
         raw = dctx.decompress(compressed)

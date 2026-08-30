@@ -85,6 +85,8 @@ def test_chunk_format_parse():
 def test_aad_generation():
     seq = 5
     snap = "snap-test"
-    aad = create_aad(seq, snap)
-    assert aad.startswith(b"BVPM\x00\x01\x00\x00\x00\x05")
+    nonce = os.urandom(12)
+    header = create_chunk_header(seq, nonce, 1024)
+    aad = create_aad(header, snap)
+    assert aad.startswith(header)
     assert aad.endswith(b"snap-test")

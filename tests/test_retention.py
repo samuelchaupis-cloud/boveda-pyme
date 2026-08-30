@@ -73,13 +73,11 @@ def test_purge_order_s3_first(db_session):
 
     s3_store = {"key-1": b"data"}
 
-    def del_cb(key):
-        s3_store.pop(key, None)
+    def del_cb(keys):
+        for key in keys:
+            s3_store.pop(key, None)
 
-    def exists_cb(key):
-        return key in s3_store
-
-    purge_expired_snapshots(db_session, del_cb, exists_cb)
+    purge_expired_snapshots(db_session, del_cb)
 
     # Verificamos
     assert len(s3_store) == 0
@@ -112,18 +110,15 @@ def test_purge_failure_rollback(db_session):
 
     s3_store = {"key-fail": b"data"}
 
-    def del_cb(key):
+    def del_cb(keys):
         # We pretend to delete but we actually fail to delete it
-        pass
+        raise ValueError("S3 deletion failed")
 
-    def exists_cb(key):
-        return key in s3_store
-
-    purge_expired_snapshots(db_session, del_cb, exists_cb)
+    purge_expired_snapshots(db_session, del_cb)
 
     # Debe hacer rollback de SQLite y marcar como PURGE_FAILED
     assert len(s3_store) == 1
     snap_db = db_session.query(Snapshot).get("snap-fail")
     assert snap_db.estado == "PURGE_FAILED"
-    assert "aún existe" in snap_db.error_detail
+    assert "S3 deletion failed" in snap_db.error_detail
     assert db_session.query(Bloque).count() == 1

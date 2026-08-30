@@ -31,10 +31,11 @@ def build_valid_snapshot_and_chunks():
 
     plaintext = b"Some data"
     compressed = cctx.compress(plaintext)
-    aad = create_aad(0, snap.id)
+    ciphertext_len = len(compressed) + 16
+    header = create_chunk_header(0, nonce, ciphertext_len)
+    aad = create_aad(header, snap.id)
     ciphertext = aesgcm.encrypt(nonce, compressed, aad)
 
-    header = create_chunk_header(0, nonce, len(ciphertext))
     raw_payload = header + ciphertext
 
     bloque = Bloque(

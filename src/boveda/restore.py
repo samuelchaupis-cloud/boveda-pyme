@@ -67,7 +67,7 @@ def restore_snapshot(
             )
 
         ciphertext = raw[26:]
-        aad = create_aad(c_seq, snapshot.id)
+        aad = create_aad(header, snapshot.id)
 
         try:
             plaintext = aesgcm.decrypt(nonce, ciphertext, aad)

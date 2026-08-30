@@ -33,16 +33,23 @@ def test_integrity_check_corrupt_fails():
     with open("corrupt.db", "wb") as f:
         f.write(b"NOT A SQLITE DB BUT TRASH BYTES" * 100)
 
+    Session = None
+    session = None
     try:
         Session = init_db("corrupt.db")
         session = Session()
         verify_db_integrity(session)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         assert "not a database" in str(e) or "bd_corrupta" in str(e)
     finally:
-        session.close()
-        Session.kw["bind"].dispose()
-        os.remove("corrupt.db")
+        if session:
+            session.close()
+        if Session:
+            Session.kw["bind"].dispose()
+        try:
+            os.remove("corrupt.db")
+        except OSError:
+            pass
 
 
 def test_fsm_transitions(db_session):

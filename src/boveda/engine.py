@@ -1,6 +1,5 @@
 import asyncio
 import hashlib
-from collections.abc import Awaitable, Callable
 
 import zstandard as zstd
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -21,6 +20,7 @@ class SubprocessError(Exception):
 async def read_source(
     cmd: list[str], queue: asyncio.Queue, shutdown_event: asyncio.Event
 ):
+    """Ejecuta el origen y alimenta la cola de a chunks de 8MB."""
     proc = await asyncio.create_subprocess_exec(
         *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
     )
@@ -31,10 +31,6 @@ async def read_source(
     while True:
         chunk = await proc.stdout.read(CHUNK_SIZE_BYTES)
         if not chunk:
-            break
-
-        if shutdown_event.is_set():
-            proc.terminate()
             break
 
         put_task = asyncio.create_task(queue.put(chunk))
@@ -48,33 +44,29 @@ async def read_source(
             p.cancel()
 
         if wait_task in done:
-            proc.terminate()
             break
 
+    await queue.put(None)
     await proc.wait()
-    if proc.returncode != 0 and not shutdown_event.is_set():
-        stderr_output = (await proc.stderr.read()).decode(errors="replace")
-        raise SubprocessError(
-            f"{cmd[0]} terminó con código {proc.returncode}: {stderr_output[:500]}"
-        )
 
-    await queue.put(None)  # Sentinel
+    if proc.returncode != 0 and not shutdown_event.is_set():
+        err = (await proc.stderr.read(500)).decode(errors="ignore")
+        raise SubprocessError(f"Proceso terminó con error {proc.returncode}: {err}")
 
 
 async def compress_encrypt_upload(
     queue: asyncio.Queue,
-    upload_semaphore: asyncio.Semaphore,
     snapshot_id: str,
     dek: bytes,
-    upload_callback: Callable[[int, bytes, str], Awaitable[None]],
+    upload_callback,
     shutdown_event: asyncio.Event,
 ):
-    cctx = zstd.ZstdCompressor(level=ZSTD_COMPRESSION_LEVEL)
     aesgcm = AESGCM(dek)
     nonce_gen = NonceGenerator()
     chunk_seq = 0
-
-    upload_tasks = []
+    upload_semaphore = asyncio.Semaphore(MAX_CONCURRENT_UPLOADS)
+    background_tasks = set()
+    cctx = zstd.ZstdCompressor(level=ZSTD_COMPRESSION_LEVEL)
 
     while True:
         get_task = asyncio.create_task(queue.get())
@@ -94,22 +86,16 @@ async def compress_encrypt_upload(
         if chunk is None:
             break
 
-        # 1. Compress
         compressed = cctx.compress(chunk)
-
-        # 2. Encrypt
         nonce = nonce_gen.next()
-        aad = create_aad(chunk_seq, snapshot_id)
+        ciphertext_len = len(compressed) + 16
+        header = create_chunk_header(chunk_seq, nonce, ciphertext_len)
+        aad = create_aad(header, snapshot_id)
         ciphertext = aesgcm.encrypt(nonce, compressed, aad)
 
-        # 3. Header + Payload
-        header = create_chunk_header(chunk_seq, nonce, len(ciphertext))
         final_payload = header + ciphertext
-
-        # 4. Hash SHA-256
         chunk_hash = hashlib.sha256(final_payload).hexdigest()
 
-        # 5. Upload (concurrent via semaphore)
         await upload_semaphore.acquire()
 
         async def do_upload(seq: int, payload: bytes, h: str):
@@ -120,33 +106,39 @@ async def compress_encrypt_upload(
                 upload_semaphore.release()
 
         task = asyncio.create_task(do_upload(chunk_seq, final_payload, chunk_hash))
-        upload_tasks.append(task)
+        background_tasks.add(task)
+        task.add_done_callback(background_tasks.discard)
 
         chunk_seq += 1
 
-    if upload_tasks:
-        await asyncio.gather(*upload_tasks, return_exceptions=True)
+    if background_tasks:
+        await asyncio.gather(*background_tasks, return_exceptions=True)
 
 
 async def streaming_pipeline(
-    source_cmd: list[str],
+    cmd: list[str],
     snapshot_id: str,
     dek: bytes,
-    upload_callback: Callable[[int, bytes, str], Awaitable[None]],
+    upload_callback,
     shutdown_event: asyncio.Event,
 ):
     queue = asyncio.Queue(maxsize=PIPELINE_QUEUE_MAXSIZE)
-    upload_semaphore = asyncio.Semaphore(MAX_CONCURRENT_UPLOADS)
 
-    async with asyncio.TaskGroup() as tg:
-        tg.create_task(read_source(source_cmd, queue, shutdown_event))
-        tg.create_task(
-            compress_encrypt_upload(
-                queue,
-                upload_semaphore,
-                snapshot_id,
-                dek,
-                upload_callback,
-                shutdown_event,
-            )
+    reader = asyncio.create_task(read_source(cmd, queue, shutdown_event))
+    writer = asyncio.create_task(
+        compress_encrypt_upload(
+            queue, snapshot_id, dek, upload_callback, shutdown_event
         )
+    )
+
+    done, _pending = await asyncio.wait(
+        [reader, writer], return_when=asyncio.FIRST_EXCEPTION
+    )
+
+    if shutdown_event.is_set():
+        for t in [reader, writer]:
+            t.cancel()
+        return
+
+    for t in done:
+        t.result()
