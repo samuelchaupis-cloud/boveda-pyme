@@ -1,0 +1,33 @@
+version: '3.8'
+
+services:
+  minio:
+    image: minio/minio:latest
+    container_name: boveda_minio
+    command: server /data --console-address ":9001"
+    environment:
+      - MINIO_ROOT_USER=boveda_test
+      - MINIO_ROOT_PASSWORD=boveda_secret_123
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+
+  minio-setup:
+    image: minio/mc:latest
+    container_name: boveda_minio_setup
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+      echo 'Esperando a MinIO...';
+      sleep 5;
+      /usr/bin/mc alias set local http://minio:9000 boveda_test boveda_secret_123;
+      /usr/bin/mc mb local/boveda-backups --ignore-existing;
+      echo 'Bucket boveda-backups creado exitosamente.';
+      exit 0;
+      "
+
+volumes:
+  minio_data:

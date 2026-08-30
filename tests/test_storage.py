@@ -91,15 +91,12 @@ def test_cleanup_in_progress_snapshots(db_session):
 
 
 @pytest.mark.asyncio
-@patch("aioboto3.Session")
-async def test_upload_to_s3(mock_session_cls):
+async def test_upload_to_s3():
     from boveda.storage import upload_to_s3
 
     mock_client = AsyncMock()
-    mock_session_instance = mock_session_cls.return_value
-    mock_session_instance.client.return_value.__aenter__.return_value = mock_client
 
-    await upload_to_s3(b"payload", "my-bucket", "my-key")
+    await upload_to_s3(mock_client, b"payload", "my-bucket", "my-key")
 
     mock_client.put_object.assert_called_once_with(
         Bucket="my-bucket", Key="my-key", Body=b"payload"
