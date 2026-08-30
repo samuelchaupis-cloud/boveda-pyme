@@ -1,0 +1,32 @@
+[Unit]
+Description=Bóveda PyME - Daemon de Respaldo Cifrado
+Documentation=https://github.com/tu-org/boveda-pyme
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=boveda
+Group=boveda
+EnvironmentFile=/etc/boveda/env
+ExecStart=/opt/boveda/venv/bin/boveda daemon
+Restart=on-failure
+RestartSec=60
+TimeoutStopSec=90
+
+# Hardening
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+NoNewPrivileges=yes
+ReadWritePaths=/var/lib/boveda /var/log/boveda
+CapabilityBoundingSet=
+SystemCallFilter=@system-service
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=boveda
+
+[Install]
+WantedBy=multi-user.target

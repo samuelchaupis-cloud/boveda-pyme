@@ -1,0 +1,10 @@
+[Unit]
+Description=Timer de Bóveda PyME - Disparo de Respaldos Programados
+
+[Timer]
+OnCalendar=*-*-* 02:00:00
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

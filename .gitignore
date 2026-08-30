@@ -3,3 +3,6 @@
 .env
 .venv
 __pycache__/
+snapshots.db
+corrupt.db
+.coverage
