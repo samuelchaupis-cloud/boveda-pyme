@@ -3,8 +3,8 @@
 block_cipher = None
 
 a = Analysis(
-    ['src/boveda/cli.py'],
-    pathex=[],
+    ['../src/boveda/cli.py'],
+    pathex=['..'],
     binaries=[],
     datas=[],
     hiddenimports=[

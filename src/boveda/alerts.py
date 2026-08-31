@@ -27,7 +27,9 @@ async def send_webhook_alert(
     try:
         async with (
             aiohttp.ClientSession() as session,
-            session.post(webhook_url, json=payload, timeout=5.0) as resp,
+            session.post(
+                webhook_url, json=payload, timeout=aiohttp.ClientTimeout(total=5.0)
+            ) as resp,
         ):
             if resp.status >= 400:
                 log.warning(f"Error enviando webhook: HTTP {resp.status}")

@@ -18,7 +18,9 @@ class SubprocessError(Exception):
 
 
 async def read_source(
-    cmd: list[str], queue: asyncio.Queue, shutdown_event: asyncio.Event
+    cmd: list[str],
+    queue: asyncio.Queue[bytes | None],
+    shutdown_event: asyncio.Event,
 ):
     """Ejecuta el origen y alimenta la cola de a chunks de 8MB."""
     proc = await asyncio.create_subprocess_exec(
@@ -29,11 +31,17 @@ async def read_source(
         raise SubprocessError("Pipes not initialized")
 
     while True:
-        chunk = await proc.stdout.read(CHUNK_SIZE_BYTES)
-        if not chunk:
+        buf = bytearray()
+        while len(buf) < CHUNK_SIZE_BYTES:
+            chunk = await proc.stdout.read(CHUNK_SIZE_BYTES - len(buf))
+            if not chunk:
+                break
+            buf.extend(chunk)
+
+        if not buf:
             break
 
-        put_task = asyncio.create_task(queue.put(chunk))
+        put_task = asyncio.create_task(queue.put(bytes(buf)))
         wait_task = asyncio.create_task(shutdown_event.wait())
 
         done, pending = await asyncio.wait(
@@ -55,7 +63,7 @@ async def read_source(
 
 
 async def compress_encrypt_upload(
-    queue: asyncio.Queue,
+    queue: asyncio.Queue[bytes | None],
     snapshot_id: str,
     dek: bytes,
     upload_callback,
@@ -65,7 +73,7 @@ async def compress_encrypt_upload(
     nonce_gen = NonceGenerator()
     chunk_seq = 0
     upload_semaphore = asyncio.Semaphore(MAX_CONCURRENT_UPLOADS)
-    background_tasks = set()
+    background_tasks: set[asyncio.Task[None]] = set()
     cctx = zstd.ZstdCompressor(level=ZSTD_COMPRESSION_LEVEL)
 
     while True:
@@ -122,7 +130,7 @@ async def streaming_pipeline(
     upload_callback,
     shutdown_event: asyncio.Event,
 ):
-    queue = asyncio.Queue(maxsize=PIPELINE_QUEUE_MAXSIZE)
+    queue: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=PIPELINE_QUEUE_MAXSIZE)
 
     reader = asyncio.create_task(read_source(cmd, queue, shutdown_event))
     writer = asyncio.create_task(

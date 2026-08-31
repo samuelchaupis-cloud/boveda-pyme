@@ -15,21 +15,22 @@ mkdir -p /etc/boveda
 chown -R boveda:boveda /var/lib/boveda
 chmod 700 /var/lib/boveda
 
-# Copiar binario (Asumiendo que pyinstaller lo dejó en dist/boveda)
+# Mover binario (Asumiendo que pyinstaller lo dejó en dist/boveda)
 if [ -f "dist/boveda" ]; then
-    cp dist/boveda /usr/local/bin/boveda
+    mv dist/boveda /usr/local/bin/boveda
     chmod +x /usr/local/bin/boveda
 else
     echo "Advertencia: Binario dist/boveda no encontrado. Se asume instalación vía pip/uv."
 fi
 
-# Copiar systemd (Se asume que deploy/boveda.service existe)
-if [ -f "deploy/boveda.service" ]; then
-    cp deploy/boveda.service /etc/systemd/system/
-    cp deploy/boveda.timer /etc/systemd/system/
+# Instalar systemd
+if [ -f "scripts/boveda.service" ]; then
+    cp scripts/boveda.service /etc/systemd/system/
     systemctl daemon-reload
-    systemctl enable boveda.timer
+    systemctl enable boveda.service
     echo "Servicios systemd instalados y habilitados."
+else
+    echo "Advertencia: Archivo scripts/boveda.service no encontrado."
 fi
 
 echo "Instalación completada exitosamente."

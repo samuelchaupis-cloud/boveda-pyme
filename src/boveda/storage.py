@@ -58,12 +58,20 @@ def cleanup_in_progress_snapshots(session, s3_client, bucket: str):
     session.commit()
 
 
-async def upload_to_s3(payload: bytes, bucket: str, key: str):
-    session = aioboto3.Session()
-    async with session.client("s3", endpoint_url=os.getenv("S3_ENDPOINT")) as s3:
-        await s3.put_object(Bucket=bucket, Key=key, Body=payload)
+@retry(
+    stop=stop_after_attempt(5),
+    wait=wait_exponential(multiplier=2, min=1, max=10) + wait_random(0, 5),
+    reraise=True,
+)
+async def upload_to_s3(s3_client, payload: bytes, bucket: str, key: str):
+    await s3_client.put_object(Bucket=bucket, Key=key, Body=payload)
 
 
+@retry(
+    stop=stop_after_attempt(5),
+    wait=wait_exponential(multiplier=2, min=1, max=10) + wait_random(0, 5),
+    reraise=True,
+)
 async def delete_objects_s3(bucket: str, keys: list[str]):
     session = aioboto3.Session()
     async with session.client("s3", endpoint_url=os.getenv("S3_ENDPOINT")) as s3:
@@ -73,9 +81,13 @@ async def delete_objects_s3(bucket: str, keys: list[str]):
             await s3.delete_objects(Bucket=bucket, Delete={"Objects": objects})
 
 
+@retry(
+    stop=stop_after_attempt(5),
+    wait=wait_exponential(multiplier=2, min=1, max=10) + wait_random(0, 5),
+    reraise=True,
+)
 async def download_from_s3(bucket: str, key: str) -> bytes:
     session = aioboto3.Session()
     async with session.client("s3", endpoint_url=os.getenv("S3_ENDPOINT")) as s3:
         response = await s3.get_object(Bucket=bucket, Key=key)
-        # response["Body"] is an aiobotocore.response.StreamingBody
         return await response["Body"].read()

@@ -90,3 +90,31 @@ def test_aad_generation():
     aad = create_aad(header, snap)
     assert aad.startswith(header)
     assert aad.endswith(b"snap-test")
+
+
+def test_dek_mutation():
+    passphrase = "my_super_secret_passphrase"
+    snapshot_id = "snap-mutation-123"
+
+    salt_b64 = generate_master_salt()
+    kek = derive_kek(passphrase, salt_b64)
+
+    _dek_raw, enc_dek, nonce, tag = generate_dek_for_snapshot(kek, snapshot_id)
+
+    # 1. Mutar ciphertext (enc_dek)
+    mutated_enc = bytearray(enc_dek)
+    mutated_enc[0] ^= 0xFF
+    with pytest.raises(InvalidTag):
+        unwrap_dek(kek, bytes(mutated_enc), nonce, tag, snapshot_id)
+
+    # 2. Mutar tag
+    mutated_tag = bytearray(tag)
+    mutated_tag[0] ^= 0xFF
+    with pytest.raises(InvalidTag):
+        unwrap_dek(kek, enc_dek, nonce, bytes(mutated_tag), snapshot_id)
+
+    # 3. Mutar nonce
+    mutated_nonce = bytearray(nonce)
+    mutated_nonce[0] ^= 0xFF
+    with pytest.raises(InvalidTag):
+        unwrap_dek(kek, enc_dek, bytes(mutated_nonce), tag, snapshot_id)

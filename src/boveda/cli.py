@@ -17,6 +17,7 @@ log = logging.getLogger(__name__)
 
 
 @click.group()
+@click.version_option("0.1.0", prog_name="boveda")
 def main():
     """Bóveda PyME CLI"""
 
@@ -120,10 +121,13 @@ def restore(snapshot_id, out, db):
             .all()
         )
 
+        import asyncio
+
         def download_callback(storage_key):
             from boveda.storage import download_from_s3
 
             bucket = os.environ.get("S3_BUCKET")
+            # We create a new session/client inside the async function in storage.py
             return asyncio.run(download_from_s3(bucket, storage_key))
 
         with open(out, "wb") as f_out:
@@ -192,46 +196,53 @@ def backup(db, tipo, source, cmd):
         session.commit()
 
         async def run_pipeline():
+            import aioboto3
+
             shutdown_event = asyncio.Event()
 
-            async def upload_callback(seq: int, payload: bytes, c_hash: str):
-                def _db_ops():
-                    local_session = Session()
-                    with local_session:
-                        existente = (
-                            local_session.query(Bloque)
-                            .filter_by(hash_sha256=c_hash)
-                            .first()
-                        )
-                        return existente.storage_key if existente else None
+            session_s3 = aioboto3.Session()
+            endpoint = os.environ.get("S3_ENDPOINT")
 
-                storage_key = await asyncio.to_thread(_db_ops)
+            async with session_s3.client("s3", endpoint_url=endpoint) as s3_client:
 
-                if not storage_key:
-                    storage_key = f"{snapshot_id}/chunk_{seq}_{c_hash[:8]}.bin"
-                    from boveda.storage import upload_to_s3
+                async def upload_callback(seq: int, payload: bytes, c_hash: str):
+                    def _db_ops():
+                        local_session = Session()
+                        with local_session:
+                            existente = (
+                                local_session.query(Bloque)
+                                .filter_by(hash_sha256=c_hash)
+                                .first()
+                            )
+                            return existente.storage_key if existente else None
 
-                    await upload_to_s3(payload, bucket, storage_key)
+                    storage_key = await asyncio.to_thread(_db_ops)
 
-                def _save_chunk():
-                    local_session = Session()
-                    with local_session:
-                        b = Bloque(
-                            snapshot_id=snapshot_id,
-                            chunk_seq=seq,
-                            hash_sha256=c_hash,
-                            size_compressed=len(payload) - 26,
-                            size_encrypted=len(payload) - 26,
-                            storage_key=storage_key,
-                        )
-                        local_session.add(b)
-                        local_session.commit()
+                    if not storage_key:
+                        storage_key = f"{snapshot_id}/chunk_{seq}_{c_hash[:8]}.bin"
+                        from boveda.storage import upload_to_s3
 
-                await asyncio.to_thread(_save_chunk)
+                        await upload_to_s3(s3_client, payload, bucket, storage_key)
 
-            await streaming_pipeline(
-                cmd.split(), snapshot_id, dek_raw, upload_callback, shutdown_event
-            )
+                    def _save_chunk():
+                        local_session = Session()
+                        with local_session:
+                            b = Bloque(
+                                snapshot_id=snapshot_id,
+                                chunk_seq=seq,
+                                hash_sha256=c_hash,
+                                size_compressed=len(payload) - 26,
+                                size_encrypted=len(payload) - 26,
+                                storage_key=storage_key,
+                            )
+                            local_session.add(b)
+                            local_session.commit()
+
+                    await asyncio.to_thread(_save_chunk)
+
+                await streaming_pipeline(
+                    cmd.split(), snapshot_id, dek_raw, upload_callback, shutdown_event
+                )
 
         try:
             asyncio.run(run_pipeline())

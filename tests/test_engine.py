@@ -3,6 +3,7 @@ import os
 
 import pytest
 import zstandard as zstd
+from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from boveda.crypto import create_aad, parse_chunk_header
@@ -101,3 +102,55 @@ async def test_pipeline_roundtrip():
         assembled_raw += raw
 
     assert assembled_raw == test_data
+
+
+@pytest.mark.asyncio
+async def test_pipeline_mutation_failures():
+    dek = os.urandom(32)
+    snapshot_id = "test-snap-mutation"
+    shutdown_event = asyncio.Event()
+
+    uploads = {}
+
+    async def mock_upload(seq: int, payload: bytes, h: str):
+        uploads[seq] = payload
+
+    cmd = [
+        "python",
+        "-c",
+        "import sys; sys.stdout.buffer.write(b'Secret'*100)",
+    ]
+
+    await streaming_pipeline(cmd, snapshot_id, dek, mock_upload, shutdown_event)
+
+    assert len(uploads) >= 1
+
+    payload = uploads[0]
+    header = payload[:26]
+    ciphertext = payload[26:]
+
+    _c_seq, nonce, _c_len = parse_chunk_header(header)
+    aesgcm = AESGCM(dek)
+
+    # 1. Mutar Ciphertext (corromper 1 byte de datos encriptados / tag)
+    mutated_ciphertext = bytearray(ciphertext)
+    mutated_ciphertext[0] ^= 0xFF
+    aad = create_aad(header, snapshot_id)
+
+    with pytest.raises(InvalidTag):
+        aesgcm.decrypt(nonce, bytes(mutated_ciphertext), aad)
+
+    # 2. Mutar tag (últimos 16 bytes de ciphertext en AESGCM)
+    mutated_tag = bytearray(ciphertext)
+    mutated_tag[-1] ^= 0xFF
+
+    with pytest.raises(InvalidTag):
+        aesgcm.decrypt(nonce, bytes(mutated_tag), aad)
+
+    # 3. Mutar header (afecta al AAD)
+    mutated_header = bytearray(header)
+    mutated_header[-1] ^= 0xFF
+    mutated_aad = create_aad(bytes(mutated_header), snapshot_id)
+
+    with pytest.raises(InvalidTag):
+        aesgcm.decrypt(nonce, ciphertext, mutated_aad)
