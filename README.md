@@ -1,19 +1,21 @@
-# Bóveda PyME
+# Bóveda PyME (v0.2.0)
 
 Bóveda PyME es un demonio Linux de respaldo enfocado en la resiliencia y el cifrado offline-first. Diseñado estrictamente para servidores con recursos limitados (PYMEs), garantiza transferencias masivas (streaming a S3) sin que la memoria RAM exceda los 45MB.
 
 ## Características Principales
 
-*   **Streaming Estricto:** Control de flujos de 8MB. Cero riesgos de "Out of Memory" (OOM).
-*   **Criptografía AAD:** Cifrado militar (AES-256-GCM) en origen. Zstandard para compresión ultrarrápida.
-*   **Tolerancia a Red Hóstil:** Auto-recuperación de conexiones caídas o saturadas mediante Exponential Backoff.
-*   **Deduplicación Hash:** Reutilización de fragmentos para ahorrar tiempo y costo de S3.
-*   **Zero-Hallucination Testing:** Probado sobre MinIO real e infraestructura de aserciones.
+*   **Streaming Acotado O(1):** Control de flujos de 8MB con memoria RAM residente estrictamente $\le 45\,\text{MB}$.
+*   **Catálogo `chunk_pool` y Triggers SQLite:** Deduplicación global en origen con conteo de referencias (`ref_count`) y purga en dos fases (*Two-Phase Soft-Delete / Sweep*) libre de punteros colgantes (*dangling pointers*).
+*   **Criptografía Convergente SIV & HKDF:** Cifrado determinista seguro basado en contenido con Synthetic IV y AAD invariante desacoplado.
+*   **Conectores de Bases de Datos:** Streaming directo para PostgreSQL (`pg_dump -Fc`), MySQL (`mysqldump`) y SQLite con drenaje no-bloqueante de `stderr` y watchdogs de inactividad.
+*   **Abstracción KeyProvider & Rotación Atómica:** Soporte para Argon2id, AWS KMS y HashiCorp Vault con comando `boveda rotate-kek` de re-envoltorio de DEKs (0 bytes a S3).
+*   **Sellado Legal & Merkle Trees:** Cálculo de raíces de Merkle RFC 6962 y firmas Ed25519 con verificación Zero-Knowledge.
+*   **Métricas Prometheus `/metrics`:** Telemetría nativa de cero huella (< 180 KB RAM) para monitoreo de memoria, snapshots y ratios de deduplicación.
 
 ## Requisitos
 
-*   Python >= 3.12 (o usar el binario independiente).
-*   Cuenta S3 compatible (AWS, Backblaze B2, MinIO local).
+*   Python >= 3.12 (o binario standalone compilado con PyInstaller).
+*   Cuenta de almacenamiento compatible con S3 (AWS S3, Backblaze B2, MinIO, Cloudflare R2).
 
 ## Instalación
 
@@ -32,31 +34,42 @@ sudo systemctl start boveda.service
 ## Uso Básico
 
 ### 1. Iniciar un Respaldo
-Puedes canalizar flujos grandes (ej. bases de datos) directamente al CLI:
+Puedes canalizar flujos de datos directamente hacia el CLI:
 ```bash
 pg_dump -U postgres mi_db | boveda backup --db prod.db --source db-prod
 ```
 
-### 2. Listar y Restaurar
+### 2. Rotación de Claves Maestras (KEK)
+Re-encripta todas las claves de snapshot atómicamente en SQLite sin transferir datos a la nube:
 ```bash
-# Ver backups completados
+boveda rotate-kek --db prod.db
+```
+
+### 3. Listar y Restaurar
+```bash
+# Listar snapshots completados
 boveda list --db prod.db
 
-# Restaurar al disco
+# Restaurar hacia archivo destino
 boveda restore snap-1234 --db prod.db --out /tmp/restore.sql
 ```
 
-### 3. Verificar Integridad S3
-Busca signos de "bit-rot" comprobando que S3 tenga exactamente la estructura registrada localmente:
+### 4. Verificación de Integridad y Bit-Rot
 ```bash
 boveda verify --db prod.db --full
 ```
 
-### 4. Monitoreo
-Si se levanta `boveda daemon`, dispondrás de una API REST (FastAPI) local en el puerto `8000`.
+### 5. Telemetría y Dashboard Web
+Inicia el daemon con API REST y endpoint OpenMetrics:
+```bash
+boveda daemon
+# Dashboard: http://127.0.0.1:8080/
+# Métricas Prometheus: http://127.0.0.1:8080/metrics
+```
 
-## Documentación Relacionada
+## Documentación Técnica
 
-*   [CONSTRAINTS.md](CONSTRAINTS.md) — Límites y restricciones operativas que moldean este proyecto.
-*   [ARCHITECTURE.md](ARCHITECTURE.md) — Diagramas y arquitectura del sistema.
+*   [CONSTRAINTS.md](CONSTRAINTS.md) — Límites y restricciones operativas del sistema.
+*   [ARCHITECTURE.md](ARCHITECTURE.md) — Diagramas y especificación de arquitectura v0.2.0.
+
 

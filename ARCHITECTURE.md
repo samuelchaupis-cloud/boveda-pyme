@@ -1,59 +1,68 @@
-# Architecture: Bóveda PyME
+# Arquitectura: Bóveda PyME v0.2.0
 
-## 1. Project Structure
+## 1. Estructura del Proyecto
 
 ```text
 boveda-pyme/
 ├── src/boveda/
-│   ├── api.py           # Dashboard FastAPI local para monitoreo de estado
-│   ├── cli.py           # Orquestador (Click), comandos backup, restore, daemon, verify
-│   ├── crypto.py        # Cifrado AES-256-GCM y hashing (Argon2, SHA-256)
-│   ├── engine.py        # Motor de streaming Zstandard sin micro-chunking
-│   ├── fsm.py           # Máquina de estados finitos (IN_PROGRESS, COMPLETED, FAILED)
-│   ├── restore.py       # Descarga e inyección del stream descifrado al local
-│   ├── retention.py     # Lógica GFS (Grandfather-Father-Son) y purga de expirados
-│   └── storage.py       # Interfaz S3 vía aioboto3 con tenacity backoff
-├── tests/               # Pruebas (unitarias, integración y e2e con MinIO)
-└── scripts/             # Empaquetado PyInstaller y despliegue systemd
+│   ├── alerts.py        # Webhooks asíncronos y alertas JSON con timeout estricto
+│   ├── api.py           # Dashboard FastAPI y endpoint de métricas Prometheus (/metrics)
+│   ├── cli.py           # Orquestador (Click): backup, restore, rotate-kek, verify, daemon
+│   ├── connectors.py    # Streaming robusto para PostgreSQL, MySQL, SQLite con drenaje de stderr
+│   ├── constants.py     # Invariantes y constantes globales de compresión y buffering
+│   ├── crypto.py        # Cifrado convergente SIV, HKDF-SHA256, AES-256-GCM y Argon2id
+│   ├── database.py      # Esquema SQLite WAL, triggers DDL y catálogo chunk_pool normalizado
+│   ├── engine.py        # Pipeline de streaming asíncrono con cola acotada O(1)
+│   ├── fsm.py           # Máquina de estados finitos (IN_PROGRESS, COMPLETED, FAILED, EXPIRED)
+│   ├── keys.py          # Abstracción KeyProvider (Argon2id, AWS KMS, Vault) y rotación atómica
+│   ├── manifest.py      # Árboles de Merkle RFC 6962, JSON canónico RFC 8785 y firmas Ed25519
+│   ├── restore.py       # Descarga e inyección del stream descifrado al destino local
+│   ├── retention.py     # Purga atómica en dos fases (Two-Phase Soft-Delete) y FSM GFS
+│   └── storage.py       # Interfaz asíncrona S3/B2 vía aioboto3 con backoff y reintentos
+├── tests/               # Suite exhaustiva (unitarias, integración, concurrencia, e2e)
+└── scripts/             # Empaquetado PyInstaller y unidad systemd con límite de memoria (45MB)
 ```
 
-## 2. High-Level System Diagram
+## 2. Diagrama de Arquitectura de Alto Nivel
 
 ```mermaid
 graph TD
     CLI[boveda CLI] --> DB[(SQLite Local WAL)]
     CLI --> Stream[Stream Engine]
-    Stream --> Crypto[AES-GCM / Zstandard]
-    Crypto --> S3[Cloud Storage / S3]
+    Stream --> DBConn[Conectores BD / Stderr Drain]
+    Stream --> Crypto[Cifrado Convergente SIV / HKDF]
+    Crypto --> S3[Cloud Storage / S3 / B2]
+    CLI --> Manifest[Sellado Merkle RFC 6962 / Ed25519]
     CLI --> Alert[Webhooks / Notificaciones]
-    Daemon[boveda daemon] --> UI[FastAPI Dashboard]
+    Daemon[boveda daemon] --> Prom["/metrics (Prometheus)"]
+    Daemon --> UI[FastAPI Dashboard]
     Daemon --> DB
 ```
 
-## 3. Core Components
+## 3. Componentes Principales
 
-### 3.1 Streaming Engine (Tolerancia a OOM)
-Procesa archivos de tamaño ilimitado inyectándolos en un buffer estricto de 8MB en `engine.py`. El chunk se comprime (Zstd), cifra (AES-GCM con AAD = Header + Snapshot ID) y se envía al almacenamiento. Memoria controlada < 45MB en todo momento.
+### 3.1 Catálogo `chunk_pool` y Triggers de `ref_count`
+- Normalización en dos entidades: `chunk_pool` (bloques físicos en S3) y `snapshot_chunks` (enlaces por snapshot).
+- **Triggers SQLite a nivel kernel:** Incremento/decremento atómico de referencias y prevención de modificaciones/eliminaciones sucias (`RAISE(ABORT)`).
 
-### 3.2 Storage Layer (Tolerancia a Red)
-`storage.py` gestiona un pool de conexiones optimizado usando `aioboto3.Session`. Cada operación S3 está rodeada por bloqueadores `tenacity` implementando **Exponential Backoff with Jitter** para sobrevivir a los Rate Limits (503 Slow Down) o micro-cortes.
+### 3.2 Purga Atómica Two-Phase Soft-Delete / Sweep
+- **Fase 1:** Transición atómica de bloques con `ref_count == 0` a `PURGING_S3`.
+- **Fase Intermedia:** Invocación masiva a S3 (`delete_objects`) **sin retener bloqueos de base de datos**.
+- **Fase 2:** Eliminación física en SQLite o reversión automática ante fallos de red, garantizando **cero punteros colgantes (*Dangling Pointers*)**.
 
-### 3.3 Deduplicación en Base de Datos (Tolerancia a redundancia)
-La DB registra cada hash criptográfico de los chunks generados. Si un chunk ya existe, se reutiliza su `storage_key` referenciándolo en SQLite y se omite la llamada POST a S3. Para soportar concurrencia intensiva se usa `BEGIN IMMEDIATE`.
+### 3.3 Conectores BD & Drenaje de Stderr
+- Soporte nativo para PostgreSQL (`pg_dump -Fc`), MySQL (`mysqldump --single-transaction`) y SQLite (`sqlite3 .dump`).
+- Corutina concurrente de drenaje continuo de `stderr` hacia un ring buffer circular de 64 KB, eliminando deadlocks por saturación de pipes del SO.
+- Watchdog de streaming en dos fases (30s arranque / 60s inactividad) con manejo transparente de `SIGPIPE`.
 
-## 4. Data Stores
+### 3.4 Criptografía Convergente & Sellado Zero-Knowledge
+- Cifrado determinista *Server-Aided Synthetic IV (SIV / DupLESS)* con claves derivadas vía HKDF ($K_{\text{dedup}}, K_{\text{id}}$).
+- Árboles de Merkle conformes a RFC 6962 con separación de dominio (`0x00` hojas / `0x01` nodos internos).
+- Serialización canónica determinista RFC 8785 y sellado asimétrico Ed25519 para auditoría legal sin necesidad de descifrar datos.
+- Abstracción `KeyProvider` para Argon2id, AWS KMS y HashiCorp Vault, junto con rotación atómica de KEK (`rotate-kek`) sin mover datos en la nube.
 
-- **Local SQLite (Modo WAL):** Mantiene el inventario de backups, bloques, política GFS y KEK maestras.
-- **S3 / Compatible (MinIO/AWS):** Destino inmutable para los blobs binarios cifrados.
+### 3.5 Observabilidad de Cero Huella
+- Endpoint `/metrics` nativo en formato texto OpenMetrics/Prometheus con consumo de memoria inferior a 180 KB.
+- Telemetría en tiempo real de memoria residente (`RSS`), contadores de snapshots, total de bloques únicos y ratios de deduplicación.
 
-## 5. Deployment & Infrastructure
-
-- Empaquetado como demonio `systemd` y binarios autocontenidos.
-- No se requiere una base de datos externa ni memoria RAM excesiva, ideal para edge y servidores PYME legacy.
-
-## 6. Security
-
-- Master Salt local + Password = KEK generada por Argon2.
-- AAD (Additional Authenticated Data) liga cada chunk de 8MB al Snapshot ID previendo swapping malicioso.
-- PII sanitizado por defecto vía `structlog` (logging estructurado en JSON).
 
