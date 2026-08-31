@@ -1,9 +1,13 @@
 import asyncio
+import contextlib
 import hashlib
+import signal
+from collections import deque
 
 import zstandard as zstd
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
+from boveda.connectors import drain_stderr_nonblocking
 from boveda.constants import (
     CHUNK_SIZE_BYTES,
     MAX_CONCURRENT_UPLOADS,
@@ -22,7 +26,7 @@ async def read_source(
     queue: asyncio.Queue[bytes | None],
     shutdown_event: asyncio.Event,
 ):
-    """Ejecuta el origen y alimenta la cola de a chunks de 8MB."""
+    """Ejecuta el origen y alimenta la cola de a chunks de 8MB con drenaje continuo de stderr."""
     proc = await asyncio.create_subprocess_exec(
         *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
     )
@@ -30,36 +34,55 @@ async def read_source(
     if proc.stdout is None or proc.stderr is None:
         raise SubprocessError("Pipes not initialized")
 
-    while True:
-        buf = bytearray()
-        while len(buf) < CHUNK_SIZE_BYTES:
-            chunk = await proc.stdout.read(CHUNK_SIZE_BYTES - len(buf))
-            if not chunk:
+    stderr_buffer: deque[bytes] = deque(maxlen=16)
+    drain_task = asyncio.create_task(
+        drain_stderr_nonblocking(proc.stderr, stderr_buffer)
+    )
+
+    try:
+        while True:
+            buf = bytearray()
+            while len(buf) < CHUNK_SIZE_BYTES:
+                chunk = await proc.stdout.read(CHUNK_SIZE_BYTES - len(buf))
+                if not chunk:
+                    break
+                buf.extend(chunk)
+
+            if not buf:
                 break
-            buf.extend(chunk)
 
-        if not buf:
-            break
+            put_task = asyncio.create_task(queue.put(bytes(buf)))
+            wait_task = asyncio.create_task(shutdown_event.wait())
 
-        put_task = asyncio.create_task(queue.put(bytes(buf)))
-        wait_task = asyncio.create_task(shutdown_event.wait())
+            done, pending = await asyncio.wait(
+                [put_task, wait_task], return_when=asyncio.FIRST_COMPLETED
+            )
 
-        done, pending = await asyncio.wait(
-            [put_task, wait_task], return_when=asyncio.FIRST_COMPLETED
-        )
+            for p in pending:
+                p.cancel()
 
-        for p in pending:
-            p.cancel()
+            if wait_task in done:
+                break
 
-        if wait_task in done:
-            break
+        await queue.put(None)
+        await proc.wait()
 
-    await queue.put(None)
-    await proc.wait()
+        if proc.returncode != 0 and not shutdown_event.is_set():
+            raw_err = b"".join(stderr_buffer).decode(errors="ignore")
+            is_sigpipe = (
+                proc.returncode == -signal.SIGPIPE
+                if hasattr(signal, "SIGPIPE")
+                else proc.returncode in (109, 141)
+            )
+            if not is_sigpipe:
+                raise SubprocessError(
+                    f"Proceso terminó con error {proc.returncode}: {raw_err[-500:]}"
+                )
 
-    if proc.returncode != 0 and not shutdown_event.is_set():
-        err = (await proc.stderr.read(500)).decode(errors="ignore")
-        raise SubprocessError(f"Proceso terminó con error {proc.returncode}: {err}")
+    finally:
+        drain_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await drain_task
 
 
 async def compress_encrypt_upload(
