@@ -1,4 +1,3 @@
-import os
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -23,17 +22,13 @@ class MockS3Client:
 
 
 @pytest.fixture
-def db_session():
-    db_path = "test_storage.db"
-    if os.path.exists(db_path):
-        os.remove(db_path)
+def db_session(tmp_path):
+    db_path = str(tmp_path / "test_storage.db")
     Session = init_db(db_path)
     session = Session()
     yield session
     session.close()
     Session.kw["bind"].dispose()
-    if os.path.exists(db_path):
-        os.remove(db_path)
 
 
 def test_abort_multipart_success():
@@ -86,8 +81,8 @@ def test_cleanup_in_progress_snapshots(db_session):
     assert client.aborted[0][2] == "up-1"
 
     # Ambos deben estar FAILED
-    assert db_session.query(Snapshot).get("snap-stale-1").estado == "FAILED"
-    assert db_session.query(Snapshot).get("snap-stale-2").estado == "FAILED"
+    assert db_session.get(Snapshot, "snap-stale-1").estado == "FAILED"
+    assert db_session.get(Snapshot, "snap-stale-2").estado == "FAILED"
 
 
 @pytest.mark.asyncio

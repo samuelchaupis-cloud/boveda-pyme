@@ -1,9 +1,13 @@
 import base64
+import hashlib
+import hmac
 import os
 import struct
 
 import argon2
+from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 ARGON2_TIME_COST = 3
 ARGON2_MEMORY_COST = 65536
@@ -30,6 +34,41 @@ def derive_kek(passphrase: str, master_salt_b64: str) -> bytes:
     return raw_hash
 
 
+def derive_dedup_keys(kek: bytes) -> tuple[bytes, bytes]:
+    """Deriva K_dedup y K_id a partir de la KEK maestra usando HKDF-SHA256."""
+    k_dedup = HKDF(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=None,
+        info=b"boveda-dedup-v2-key",
+    ).derive(kek)
+
+    k_id = HKDF(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=None,
+        info=b"boveda-dedup-v2-id",
+    ).derive(kek)
+
+    return k_dedup, k_id
+
+
+def compute_content_id(k_id: bytes, data: bytes) -> str:
+    """Calcula el identificador criptográfico de almacenamiento (storage_key hash) usando HMAC-SHA256."""
+    return hmac.new(k_id, data, hashlib.sha256).hexdigest()
+
+
+def derive_chunk_key(k_dedup: bytes, data: bytes) -> bytes:
+    """Calcula la clave efímera de bloque (Content-Derived DEK) usando HMAC-SHA256."""
+    return hmac.new(k_dedup, data, hashlib.sha256).digest()
+
+
+def compute_synthetic_nonce(chunk_key: bytes, aad: bytes, data: bytes) -> bytes:
+    """Calcula el Synthetic Nonce de 96 bits (12 bytes) para SIV determinista seguro."""
+    h = hmac.new(chunk_key, aad + data, hashlib.sha256).digest()
+    return h[:12]
+
+
 def generate_dek_for_snapshot(
     kek: bytes, snapshot_id: str
 ) -> tuple[bytes, bytes, bytes, bytes]:
@@ -40,7 +79,7 @@ def generate_dek_for_snapshot(
     dek_nonce = os.urandom(12)
     aesgcm = AESGCM(kek)
 
-    # Requirement: AAD must include snapshot.id
+    # AAD includes snapshot.id
     aad = snapshot_id.encode("utf-8")
     ciphertext = aesgcm.encrypt(dek_nonce, dek_raw, aad)
 
@@ -78,7 +117,7 @@ class NonceGenerator:
 
 def create_chunk_header(chunk_seq: int, nonce: bytes, ciphertext_len: int) -> bytes:
     """
-    Formato:
+    Formato v1 (26 bytes):
     0-4: magic (4 bytes) "BVPM"
     4-6: version (uint16) 1
     6-10: chunk_seq (uint32)
@@ -104,9 +143,36 @@ def parse_chunk_header(header: bytes) -> tuple[int, bytes, int]:
     return chunk_seq, nonce, ciphertext_len
 
 
+def create_chunk_header_v2(
+    chunk_seq: int, nonce: bytes, raw_len: int, ciphertext_len: int
+) -> bytes:
+    """
+    Formato v2 (30 bytes):
+    0-4: magic (4 bytes) "BVPM"
+    4-6: version (uint16) 2
+    6-10: chunk_seq (uint32)
+    10-14: raw_len (uint32)
+    14-18: ciphertext_len (uint32)
+    18-30: nonce (12 bytes)
+    """
+    magic = b"BVPM"
+    version = 2
+    return struct.pack(
+        ">4sHIII12s", magic, version, chunk_seq, raw_len, ciphertext_len, nonce
+    )
+
+
 def create_aad(header: bytes, snapshot_id: str) -> bytes:
     """
     Construye el AAD usando todo el header binario de 26 bytes
     más el snapshot_id (aislamiento temporal).
     """
     return header + snapshot_id.encode("utf-8")
+
+
+def create_invariant_aad(header: bytes) -> bytes:
+    """
+    Construye el AAD invariante a partir de la cabecera del bloque,
+    desacoplado del snapshot_id para permitir deduplicación cross-snapshot.
+    """
+    return header

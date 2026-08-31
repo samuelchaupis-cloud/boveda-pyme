@@ -7,7 +7,14 @@ from datetime import UTC, datetime
 import click
 
 from boveda.crypto import derive_kek, generate_dek_for_snapshot, generate_master_salt
-from boveda.database import Bloque, Configuracion, Snapshot, init_db
+from boveda.database import (
+    Bloque,
+    ChunkPool,
+    Configuracion,
+    Snapshot,
+    SnapshotChunk,
+    init_db,
+)
 from boveda.engine import streaming_pipeline
 from boveda.restore import restore_snapshot
 from boveda.retention import purge_expired_snapshots
@@ -206,39 +213,63 @@ def backup(db, tipo, source, cmd):
             async with session_s3.client("s3", endpoint_url=endpoint) as s3_client:
 
                 async def upload_callback(seq: int, payload: bytes, c_hash: str):
-                    def _db_ops():
+                    def _db_check_and_prepare():
                         local_session = Session()
                         with local_session:
-                            existente = (
-                                local_session.query(Bloque)
+                            from sqlalchemy import text
+
+                            local_session.execute(text("BEGIN IMMEDIATE"))
+                            pool_entry = (
+                                local_session.query(ChunkPool)
                                 .filter_by(hash_sha256=c_hash)
                                 .first()
                             )
-                            return existente.storage_key if existente else None
+                            if not pool_entry:
+                                storage_key = f"chunks/{c_hash}.bin"
+                                new_pool = ChunkPool(
+                                    hash_sha256=c_hash,
+                                    storage_key=storage_key,
+                                    size_compressed=len(payload) - 26,
+                                    size_encrypted=len(payload) - 26,
+                                    ref_count=0,
+                                    state="ACTIVE",
+                                )
+                                local_session.add(new_pool)
+                                local_session.commit()
+                                return storage_key, True
+                            else:
+                                if pool_entry.state in (
+                                    "PENDING_DELETE",
+                                    "PURGING_S3",
+                                ):
+                                    pool_entry.state = "ACTIVE"
+                                    pool_entry.purge_scheduled_at = None
+                                storage_key = pool_entry.storage_key
+                                local_session.commit()
+                                return storage_key, False
 
-                    storage_key = await asyncio.to_thread(_db_ops)
+                    storage_key, is_new = await asyncio.to_thread(_db_check_and_prepare)
 
-                    if not storage_key:
-                        storage_key = f"{snapshot_id}/chunk_{seq}_{c_hash[:8]}.bin"
+                    if is_new:
                         from boveda.storage import upload_to_s3
 
                         await upload_to_s3(s3_client, payload, bucket, storage_key)
 
-                    def _save_chunk():
+                    def _save_chunk_ref():
                         local_session = Session()
                         with local_session:
-                            b = Bloque(
+                            from sqlalchemy import text
+
+                            local_session.execute(text("BEGIN IMMEDIATE"))
+                            sc = SnapshotChunk(
                                 snapshot_id=snapshot_id,
                                 chunk_seq=seq,
-                                hash_sha256=c_hash,
-                                size_compressed=len(payload) - 26,
-                                size_encrypted=len(payload) - 26,
-                                storage_key=storage_key,
+                                chunk_hash=c_hash,
                             )
-                            local_session.add(b)
+                            local_session.add(sc)
                             local_session.commit()
 
-                    await asyncio.to_thread(_save_chunk)
+                    await asyncio.to_thread(_save_chunk_ref)
 
                 await streaming_pipeline(
                     cmd.split(), snapshot_id, dek_raw, upload_callback, shutdown_event
@@ -256,10 +287,11 @@ def backup(db, tipo, source, cmd):
             asyncio.run(send_webhook_alert(snapshot_id, "COMPLETED"))
         except Exception as e:  # noqa: BLE001
             session.rollback()
-            snapshot = session.query(Snapshot).get(snapshot_id)
-            snapshot.estado = "FAILED"
-            snapshot.error_detail = str(e)[:500]
-            session.commit()
+            snapshot = session.get(Snapshot, snapshot_id)
+            if snapshot:
+                snapshot.estado = "FAILED"
+                snapshot.error_detail = str(e)[:500]
+                session.commit()
             click.echo(f"Error en streaming: {e}", err=True)
             from boveda.alerts import send_webhook_alert
 

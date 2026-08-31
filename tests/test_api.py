@@ -4,7 +4,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from boveda.api import app
-from boveda.database import Bloque, Snapshot, init_db
+from boveda.database import Snapshot, init_db
 
 
 @pytest.fixture
@@ -15,6 +15,19 @@ def client_with_db(tmp_path, monkeypatch):
     monkeypatch.setattr("boveda.api.Session", Session)
 
     with Session() as session:
+        from boveda.database import ChunkPool, SnapshotChunk
+
+        cp = ChunkPool(
+            hash_sha256="hash123",
+            storage_key="k1",
+            size_compressed=100,
+            size_encrypted=100,
+            ref_count=0,
+            state="ACTIVE",
+        )
+        session.add(cp)
+        session.commit()
+
         s1 = Snapshot(
             id="snap-api-1",
             estado="COMPLETED",
@@ -26,15 +39,15 @@ def client_with_db(tmp_path, monkeypatch):
             dek_tag=b"tag",
             timestamp=datetime.now(UTC),
         )
-        b1 = Bloque(
+        session.add(s1)
+        session.commit()
+
+        b1 = SnapshotChunk(
             snapshot_id="snap-api-1",
             chunk_seq=0,
-            hash_sha256="hash123",
-            size_compressed=100,
-            size_encrypted=100,
-            storage_key="k1",
+            chunk_hash="hash123",
         )
-        session.add_all([s1, b1])
+        session.add(b1)
         session.commit()
 
     return TestClient(app)

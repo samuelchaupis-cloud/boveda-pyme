@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 
-from boveda.database import Bloque, Snapshot, init_db
+from boveda.database import ChunkPool, Snapshot, init_db
 
 app = FastAPI(title="Bóveda PyME Dashboard", version="1.0.0")
 Session = init_db("snapshots.db")
@@ -35,7 +35,7 @@ def list_snapshots():
 def get_stats():
     with Session() as session:
         snaps = session.query(Snapshot).filter_by(estado="COMPLETED").count()
-        total_blocks = session.query(Bloque).count()
+        total_blocks = session.query(ChunkPool).count()
         return {
             "total_snapshots_completed": snaps,
             "total_deduplicated_blocks": total_blocks,

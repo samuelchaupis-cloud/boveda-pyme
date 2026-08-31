@@ -32,3 +32,16 @@ async def test_webhook_enabled():
         assert kwargs["json"]["snapshot_id"] == "snap-2"
 
     del os.environ["BOVEDA_WEBHOOK_URL"]
+
+
+@pytest.mark.asyncio
+async def test_webhook_exception_handled():
+    os.environ["BOVEDA_WEBHOOK_URL"] = "http://dummy-webhook"
+
+    with patch("aiohttp.ClientSession.post") as mock_post:
+        mock_post.side_effect = TimeoutError("Connection timed out")
+
+        # Must not raise exception
+        await send_webhook_alert("snap-3", "FAILED", "Error")
+
+    del os.environ["BOVEDA_WEBHOOK_URL"]

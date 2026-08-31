@@ -83,3 +83,25 @@ def test_restore_gcm_mismatch():
         restore_snapshot(snap, kek, bloques, out, lambda k: store[k])
 
     assert out.getvalue() == b""
+
+
+def test_restore_not_completed():
+    from boveda.restore import RestoreError
+
+    snap = Snapshot(id="snap-inc", estado="RUNNING")
+    with pytest.raises(RestoreError, match="Snapshot no está COMPLETED"):
+        restore_snapshot(snap, b"0" * 32, [], io.BytesIO(), lambda k: b"")
+
+
+def test_restore_dek_corruption():
+    snap, kek, bloques, store, _plaintext = build_valid_snapshot_and_chunks()
+    snap.encrypted_dek = b"invalid_dek_bytes_xyz"
+    with pytest.raises(IntegrityError, match="Error al descifrar DEK"):
+        restore_snapshot(snap, kek, bloques, io.BytesIO(), lambda k: store[k])
+
+
+def test_restore_sequence_mismatch():
+    snap, kek, bloques, store, _plaintext = build_valid_snapshot_and_chunks()
+    bloques[0].chunk_seq = 999  # Mismatch with header chunk_seq 0
+    with pytest.raises(IntegrityError, match="Mismatch de secuencia"):
+        restore_snapshot(snap, kek, bloques, io.BytesIO(), lambda k: store[k])

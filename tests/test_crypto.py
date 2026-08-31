@@ -118,3 +118,52 @@ def test_dek_mutation():
     mutated_nonce[0] ^= 0xFF
     with pytest.raises(InvalidTag):
         unwrap_dek(kek, enc_dek, bytes(mutated_nonce), tag, snapshot_id)
+
+
+def test_dedup_keys_and_synthetic_iv():
+    from boveda.crypto import (
+        compute_content_id,
+        compute_synthetic_nonce,
+        create_chunk_header_v2,
+        create_invariant_aad,
+        derive_chunk_key,
+        derive_dedup_keys,
+    )
+
+    kek = b"0" * 32
+    k_dedup, k_id = derive_dedup_keys(kek)
+    assert len(k_dedup) == 32
+    assert len(k_id) == 32
+    assert k_dedup != k_id
+
+    # Test content ID (deterministic)
+    data1 = b"some data to chunk"
+    data2 = b"some data to chunk"
+    data3 = b"different data"
+
+    id1 = compute_content_id(k_id, data1)
+    id2 = compute_content_id(k_id, data2)
+    id3 = compute_content_id(k_id, data3)
+
+    assert len(id1) == 64
+    assert id1 == id2
+    assert id1 != id3
+
+    # Test chunk key (deterministic)
+    ckey1 = derive_chunk_key(k_dedup, data1)
+    ckey2 = derive_chunk_key(k_dedup, data2)
+    assert len(ckey1) == 32
+    assert ckey1 == ckey2
+
+    # Test synthetic nonce
+    header = create_chunk_header_v2(
+        chunk_seq=0, nonce=b"0" * 12, raw_len=100, ciphertext_len=120
+    )
+    assert len(header) == 30
+    aad = create_invariant_aad(header)
+    assert aad == header
+
+    s_nonce1 = compute_synthetic_nonce(ckey1, aad, data1)
+    s_nonce2 = compute_synthetic_nonce(ckey2, aad, data2)
+    assert len(s_nonce1) == 12
+    assert s_nonce1 == s_nonce2

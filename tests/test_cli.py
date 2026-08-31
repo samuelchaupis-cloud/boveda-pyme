@@ -1,11 +1,10 @@
-import hashlib
 import sys
 from unittest.mock import AsyncMock, patch
 
 from click.testing import CliRunner
 
 from boveda.cli import main
-from boveda.database import Bloque, Snapshot, init_db
+from boveda.database import Snapshot, SnapshotChunk, init_db
 
 
 def test_cli_init_and_list(tmp_path):
@@ -107,15 +106,13 @@ def test_cli_backup_and_restore_workflow(tmp_path, monkeypatch):
     # Quick verify
     with patch("aioboto3.Session") as mock_aioboto:
         mock_client = AsyncMock()
-        mock_client.head_object = AsyncMock(return_value={"ContentLength": 26 + 100})
+        with Session() as session:
+            b = session.query(SnapshotChunk).filter_by(snapshot_id=snapshot_id).first()
+            actual_len = len(s3_storage[b.storage_key]) if b else 100
+        mock_client.head_object = AsyncMock(return_value={"ContentLength": actual_len})
         mock_aioboto.return_value.client.return_value.__aenter__.return_value = (
             mock_client
         )
-
-        with Session() as session:
-            b = session.query(Bloque).filter_by(snapshot_id=snapshot_id).first()
-            b.size_encrypted = 100
-            session.commit()
 
         res_quick = runner.invoke(
             main, ["verify", snapshot_id, "--quick", "--db", db_path]
@@ -126,11 +123,9 @@ def test_cli_backup_and_restore_workflow(tmp_path, monkeypatch):
     with patch("aioboto3.Session") as mock_aioboto:
         mock_client = AsyncMock()
         with Session() as session:
-            b = session.query(Bloque).filter_by(snapshot_id=snapshot_id).first()
+            b = session.query(SnapshotChunk).filter_by(snapshot_id=snapshot_id).first()
             mock_body = AsyncMock()
-            mock_body.read.return_value = b"sample_payload"
-            b.hash_sha256 = hashlib.sha256(b"sample_payload").hexdigest()
-            session.commit()
+            mock_body.read.return_value = s3_storage[b.storage_key] if b else b""
 
         mock_client.get_object = AsyncMock(return_value={"Body": mock_body})
         mock_aioboto.return_value.client.return_value.__aenter__.return_value = (
