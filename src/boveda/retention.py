@@ -81,7 +81,7 @@ def execute_two_phase_purge(
         if storage_keys:
             delete_objects_callback(storage_keys)
         s3_success = True
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         log.error(f"Fallo en llamada delete_objects hacia S3: {exc}")
 
     # Fase 2: Confirmación o reversión en SQLite
@@ -124,7 +124,7 @@ def purge_expired_snapshots(
             # 2. Ejecutar Two-Phase Purge para los chunks cuyo ref_count llegó a 0
             execute_two_phase_purge(session, delete_objects_callback)
 
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             session.rollback()
             snap = session.get(Snapshot, snap.id)
             if snap:

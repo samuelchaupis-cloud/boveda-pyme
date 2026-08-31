@@ -55,7 +55,7 @@ def test_full_workflow_e2e():
 
     try:
         urllib.request.urlopen("http://127.0.0.1:9000/minio/health/live", timeout=2)
-    except Exception:  # noqa: BLE001
+    except Exception:
         pytest.skip("MinIO no está corriendo localmente en el puerto 9000. Saltar E2E.")
 
     runner = CliRunner()

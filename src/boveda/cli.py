@@ -55,7 +55,7 @@ def init(db):
         session.commit()
         click.echo(f"Inicialización completa en {db}.")
 
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         session.rollback()
         click.echo(f"Error durante la inicialización: {e}", err=True)
     finally:
@@ -142,7 +142,7 @@ def restore(snapshot_id, out, db):
 
         click.echo(f"Snapshot {snapshot_id} restaurado exitosamente en {out}")
 
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         click.echo(f"Error durante la restauración: {e}", err=True)
     finally:
         session.close()
@@ -285,7 +285,7 @@ def backup(db, tipo, source, cmd):
             from boveda.alerts import send_webhook_alert
 
             asyncio.run(send_webhook_alert(snapshot_id, "COMPLETED"))
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             session.rollback()
             snapshot = session.get(Snapshot, snapshot_id)
             if snapshot:
@@ -307,7 +307,7 @@ def backup(db, tipo, source, cmd):
 
         purge_expired_snapshots(session, delete_cb)
 
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         click.echo(f"Error general durante el backup: {e}", err=True)
         if "snapshot" in locals() and snapshot:
             snapshot.estado = "FAILED"
@@ -400,7 +400,7 @@ def verify(snapshot_id, quick, full, db):
                                     f"❌ Discrepancia de tamaño en {b.storage_key}"
                                 )
                                 return False
-                        except Exception as e:  # noqa: BLE001
+                        except Exception as e:
                             click.echo(f"❌ Fallo HEAD {b.storage_key}: {e}")
                             return False
                     elif full:
@@ -413,7 +413,7 @@ def verify(snapshot_id, quick, full, db):
                                     f"❌ Hash corrupto en {b.storage_key} (Bit-rot detectado)"
                                 )
                                 return False
-                        except Exception as e:  # noqa: BLE001
+                        except Exception as e:
                             click.echo(f"❌ Fallo GET {b.storage_key}: {e}")
                             return False
             return True
@@ -424,8 +424,51 @@ def verify(snapshot_id, quick, full, db):
         else:
             click.echo(f"❌ Snapshot {snapshot_id} está corrupto.")
 
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         click.echo(f"Error interno durante verificación: {e}", err=True)
+    finally:
+        session.close()
+
+
+@main.command(name="rotate-kek")
+@click.option("--db", default="snapshots.db", help="Ruta a la base de datos")
+@click.option(
+    "--old-passphrase",
+    envvar="BOVEDA_OLD_PASSPHRASE",
+    help="Antigua contraseña maestra",
+    prompt=True,
+    hide_input=True,
+)
+@click.option(
+    "--new-passphrase",
+    envvar="BOVEDA_NEW_PASSPHRASE",
+    help="Nueva contraseña maestra",
+    prompt=True,
+    hide_input=True,
+)
+def rotate_kek(db, old_passphrase, new_passphrase):
+    """Re-envuelve atómicamente todas las claves DEK con una nueva KEK sin transferir datos a S3."""
+    Session = init_db(db)
+    session = Session()
+    try:
+        from boveda.crypto import derive_kek, generate_master_salt
+        from boveda.keys import rotate_kek_in_database
+
+        salt_conf = session.query(Configuracion).filter_by(clave="master_salt").first()
+        if not salt_conf:
+            click.echo("Error: Base de datos no inicializada.", err=True)
+            return
+
+        old_kek = derive_kek(old_passphrase, salt_conf.valor)
+        new_salt = generate_master_salt()
+        new_kek = derive_kek(new_passphrase, new_salt)
+
+        count = rotate_kek_in_database(session, old_kek, new_kek, new_salt)
+        click.echo(
+            f"✅ Rotación de KEK completada con éxito. Snapshots re-envueltos: {count}"
+        )
+    except Exception as exc:
+        click.echo(f"❌ Error durante rotación de KEK: {exc}", err=True)
     finally:
         session.close()
 

@@ -36,7 +36,7 @@ def test_integrity_check_corrupt_fails(tmp_path):
         Session = init_db(corrupt_file)
         session = Session()
         verify_db_integrity(session)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         assert "not a database" in str(e) or "bd_corrupta" in str(e)
     finally:
         if session:

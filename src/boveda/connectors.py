@@ -38,7 +38,7 @@ async def drain_stderr_nonblocking(
             ring_buffer.append(chunk)
     except asyncio.CancelledError:
         pass
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         log.debug("error_drenando_stderr", extra={"error": str(exc)})
 
 

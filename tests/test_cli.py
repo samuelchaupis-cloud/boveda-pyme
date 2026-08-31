@@ -146,3 +146,18 @@ def test_cli_daemon_invocation():
         result = runner.invoke(main, ["daemon"])
         assert result.exit_code == 0
         assert mock_sub.called
+
+
+def test_cli_rotate_kek(tmp_path):
+    db_path = str(tmp_path / "cli_rotate.db")
+    runner = CliRunner()
+    runner.invoke(main, ["init", "--db", db_path])
+
+    # Rotate KEK
+    result = runner.invoke(
+        main,
+        ["rotate-kek", "--db", db_path],
+        input="old_pass\nnew_pass\n",
+    )
+    assert result.exit_code == 0
+    assert "Rotación de KEK completada con éxito" in result.output

@@ -52,3 +52,10 @@ pythonpath = ['src']
 [tool.mypy]
 ignore_missing_imports = true
 # Justificacion: aioboto3 y botocore no proveen stubs oficiales integrados y estamos usando el driver directamente.
+
+[tool.ruff.lint]
+ignore = [
+    "BLE001", # Justificacion arquitectonica: los daemons y orquestadores de backup deben capturar excepciones genericas en fronteras de subprocesos/red para registrar errores y evitar caidas del proceso de fondo.
+    "S110",   # Justificacion: captura defensiva con fallback para mediciones opcionales de memoria RSS del sistema operativo.
+]
+

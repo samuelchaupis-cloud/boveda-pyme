@@ -70,3 +70,14 @@ def test_api_endpoints(client_with_db):
     stats = response.json()
     assert stats["total_snapshots_completed"] == 1
     assert stats["total_deduplicated_blocks"] == 1
+
+
+def test_prometheus_metrics_endpoint(client_with_db):
+    response = client_with_db.get("/metrics")
+    assert response.status_code == 200
+    assert "text/plain" in response.headers["content-type"]
+    text_content = response.text
+    assert "boveda_process_resident_memory_bytes" in text_content
+    assert 'boveda_snapshots_total{status="completed"} 1' in text_content
+    assert "boveda_chunks_unique_total 1" in text_content
+    assert "boveda_deduplication_ratio" in text_content

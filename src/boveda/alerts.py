@@ -33,5 +33,5 @@ async def send_webhook_alert(
         ):
             if resp.status >= 400:
                 log.warning(f"Error enviando webhook: HTTP {resp.status}")
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         log.warning(f"Excepción al enviar webhook: {e}")
