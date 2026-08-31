@@ -1,0 +1,19 @@
+[Unit]
+Description=Boveda-PyME Backup Daemon
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Environment="BOVEDA_PASSPHRASE=tu-passphrase-segura"
+Environment="S3_BUCKET=tu-bucket"
+Environment="AWS_ACCESS_KEY_ID=tu-key"
+Environment="AWS_SECRET_ACCESS_KEY=tu-secret"
+Environment="S3_ENDPOINT=https://s3.us-east-1.amazonaws.com"
+ExecStart=/usr/local/bin/boveda daemon
+Restart=on-failure
+RestartSec=5s
+MemoryLimit=45M
+
+[Install]
+WantedBy=multi-user.target

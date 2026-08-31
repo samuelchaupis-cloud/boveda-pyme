@@ -25,8 +25,15 @@ dependencies = [
 [project.scripts]
 boveda = "boveda.cli:main"
 
-[tool.uv]
-dev-dependencies = [
+[build-system]
+requires = ["uv_build>=0.12"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "boveda"
+
+[dependency-groups]
+dev = [
     "pytest>=8.0",
     "pytest-cov>=5.0",
     "pytest-asyncio>=0.24",
