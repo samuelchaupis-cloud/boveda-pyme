@@ -1,3 +1,5 @@
+import os
+import re
 from datetime import UTC, datetime
 
 from sqlalchemy import (
@@ -271,3 +273,21 @@ def init_db(db_path: str):
             conn.execute(text(trigger_sql))
         conn.commit()
     return sessionmaker(bind=engine)
+
+
+def get_tenant_db_path(tenant_id: str, base_dir: str = "data/tenants") -> str:
+    """Genera la ruta segura al archivo SQLite específico del inquilino (Database-per-Tenant)."""
+    sanitized_id = re.sub(r"[^a-zA-Z0-9_-]", "", tenant_id)
+    if not sanitized_id:
+        raise ValueError("Identificador de inquilino inválido o vacío")
+    tenant_dir = os.path.join(base_dir, sanitized_id)
+    os.makedirs(tenant_dir, exist_ok=True)
+    return os.path.join(tenant_dir, "snapshots.db")
+
+
+def get_tenant_session_factory(
+    tenant_id: str, base_dir: str = "data/tenants"
+) -> sessionmaker:
+    """Retorna una fábrica de sesiones SQLAlchemy inicializada para el inquilino específico."""
+    db_path = get_tenant_db_path(tenant_id, base_dir=base_dir)
+    return init_db(db_path)

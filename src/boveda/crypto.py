@@ -34,21 +34,40 @@ def derive_kek(passphrase: str, master_salt_b64: str) -> bytes:
     return raw_hash
 
 
-def derive_dedup_keys(kek: bytes) -> tuple[bytes, bytes]:
-    """Deriva K_dedup y K_id a partir de la KEK maestra usando HKDF-SHA256."""
+def derive_tenant_kek(
+    kek: bytes, tenant_id: str, tenant_salt: bytes | None = None
+) -> bytes:
+    """Deriva una KEK criptográficamente aislada por inquilino usando HKDF-SHA256."""
+    info = f"boveda-tenant:{tenant_id}".encode()
+    return HKDF(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=tenant_salt,
+        info=info,
+    ).derive(kek)
+
+
+def derive_dedup_keys(
+    kek: bytes,
+    tenant_id: str | None = None,
+    tenant_salt: bytes | None = None,
+) -> tuple[bytes, bytes]:
+    """Deriva K_dedup y K_id usando HKDF-SHA256, aplicando aislamiento por inquilino si se especifica."""
+    source_key = derive_tenant_kek(kek, tenant_id, tenant_salt) if tenant_id else kek
+
     k_dedup = HKDF(
         algorithm=hashes.SHA256(),
         length=32,
         salt=None,
         info=b"boveda-dedup-v2-key",
-    ).derive(kek)
+    ).derive(source_key)
 
     k_id = HKDF(
         algorithm=hashes.SHA256(),
         length=32,
         salt=None,
         info=b"boveda-dedup-v2-id",
-    ).derive(kek)
+    ).derive(source_key)
 
     return k_dedup, k_id
 
@@ -176,3 +195,11 @@ def create_invariant_aad(header: bytes) -> bytes:
     desacoplado del snapshot_id para permitir deduplicación cross-snapshot.
     """
     return header
+
+
+def create_tenant_aad(header: bytes, tenant_id: str) -> bytes:
+    """
+    Construye el AAD asociando el header binario con el identificador del inquilino,
+    previniendo ataques de sustitución cruzada entre inquilinos.
+    """
+    return header + tenant_id.encode("utf-8")

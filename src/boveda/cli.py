@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import shlex
 import uuid
 from datetime import UTC, datetime
 
@@ -271,8 +272,9 @@ def backup(db, tipo, source, cmd):
 
                     await asyncio.to_thread(_save_chunk_ref)
 
+                cmd_args = shlex.split(cmd, posix=os.name != "nt")
                 await streaming_pipeline(
-                    cmd.split(), snapshot_id, dek_raw, upload_callback, shutdown_event
+                    cmd_args, snapshot_id, dek_raw, upload_callback, shutdown_event
                 )
 
         try:

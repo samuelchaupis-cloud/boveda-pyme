@@ -1,5 +1,7 @@
 from unittest.mock import MagicMock
 
+import pytest
+
 from boveda.crypto import (
     derive_kek,
     generate_dek_for_snapshot,
@@ -24,7 +26,7 @@ def test_argon2id_key_provider():
     assert provider.get_provider_identifier() == "local:argon2id"
 
 
-def test_aws_kms_key_provider():
+def test_aws_kms_key_provider(monkeypatch):
     mock_kms = MagicMock()
     mock_kms.generate_data_key.return_value = {"Plaintext": b"1" * 32}
 
@@ -33,16 +35,45 @@ def test_aws_kms_key_provider():
     assert kek == b"1" * 32
     assert provider.get_provider_identifier() == "aws:kms:arn:aws:kms:key/123"
 
-    # Fallback without client
-    provider_fallback = AwsKmsKeyProvider("key-xyz")
-    assert len(provider_fallback.get_kek()) == 32
+    # Environment mock key
+    import base64
+
+    monkeypatch.setenv(
+        "BOVEDA_KMS_MOCK_KEY", base64.b64encode(b"2" * 32).decode("utf-8")
+    )
+    provider_env = AwsKmsKeyProvider("key-env")
+    assert provider_env.get_kek() == b"2" * 32
+
+    # Error without client or env
+    monkeypatch.delenv("BOVEDA_KMS_MOCK_KEY")
+    from boveda.keys import KeyProviderError
+
+    provider_err = AwsKmsKeyProvider("key-xyz")
+    with pytest.raises(KeyProviderError, match="AWS KMS no configurado"):
+        provider_err.get_kek()
 
 
-def test_vault_transit_key_provider():
-    provider = VaultTransitKeyProvider("boveda-master-key")
+def test_vault_transit_key_provider(monkeypatch):
+    mock_vault = MagicMock()
+    import base64
+
+    b64_32 = base64.b64encode(b"v" * 32).decode("utf-8")
+    mock_vault.secrets.transit.generate_data_key.return_value = {
+        "data": {"plaintext": b64_32}
+    }
+
+    provider = VaultTransitKeyProvider("boveda-master-key", mock_vault)
     kek = provider.get_kek()
     assert len(kek) == 32
     assert provider.get_provider_identifier() == "vault:transit:boveda-master-key"
+
+    # Error without client or env
+    from boveda.keys import KeyProviderError
+
+    monkeypatch.delenv("BOVEDA_VAULT_MOCK_KEY", raising=False)
+    provider_err = VaultTransitKeyProvider("vault-unconfigured")
+    with pytest.raises(KeyProviderError, match="HashiCorp Vault no configurado"):
+        provider_err.get_kek()
 
 
 def test_rotate_kek_in_database(tmp_path):

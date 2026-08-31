@@ -173,3 +173,51 @@ def test_snapshot_chunk_properties_accessors(db_session):
     assert sc_standalone.size_compressed == 600
     assert sc_standalone.size_encrypted == 620
     assert sc_standalone.hash_sha256 == "def"
+
+
+def test_tenant_database_factory_and_path(tmp_path):
+    from boveda.database import (
+        Snapshot,
+        get_tenant_db_path,
+        get_tenant_session_factory,
+    )
+
+    base_dir = str(tmp_path / "tenants")
+    tenant_1 = "tenant_alpha"
+    tenant_2 = "tenant_beta"
+
+    db_path_1 = get_tenant_db_path(tenant_1, base_dir=base_dir)
+    db_path_2 = get_tenant_db_path(tenant_2, base_dir=base_dir)
+
+    assert "tenant_alpha" in db_path_1
+    assert "tenant_beta" in db_path_2
+    assert db_path_1 != db_path_2
+
+    # Factory 1
+    SessionFactory1 = get_tenant_session_factory(tenant_1, base_dir=base_dir)
+    with SessionFactory1() as session1:
+        s1 = Snapshot(
+            id="snap-t1",
+            tipo="DIARIO",
+            source_type="file",
+            source_identifier="/data",
+            encrypted_dek=b"enc",
+            dek_nonce=b"nonce",
+            dek_tag=b"tag",
+            estado="COMPLETED",
+        )
+        session1.add(s1)
+        session1.commit()
+
+    # Factory 2
+    SessionFactory2 = get_tenant_session_factory(tenant_2, base_dir=base_dir)
+    with SessionFactory2() as session2:
+        # snap-t1 NO debe existir en la BD del Tenant 2 (Aislamiento Físico)
+        assert session2.get(Snapshot, "snap-t1") is None
+
+    # Invalid tenant id
+    with pytest.raises(ValueError, match="Identificador de inquilino inválido o vacío"):
+        get_tenant_db_path("", base_dir=base_dir)
+
+    SessionFactory1.kw["bind"].dispose()
+    SessionFactory2.kw["bind"].dispose()

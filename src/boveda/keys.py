@@ -19,6 +19,10 @@ from boveda.database import Snapshot
 log = logging.getLogger(__name__)
 
 
+class KeyProviderError(Exception):
+    """Error fatal en la obtención o resolución de claves maestras."""
+
+
 class KeyProvider(ABC):
     """Protocolo base para proveedores de gestión de claves maestras (KEK)."""
 
@@ -58,7 +62,6 @@ class AwsKmsKeyProvider(KeyProvider):
 
     def get_kek(self) -> bytes:
         if self._cached_kek is None:
-            # En producción real, invoca kms_client.generate_data_key o decrypt
             if self._kms_client is not None:
                 resp = self._kms_client.generate_data_key(
                     KeyId=self._key_id, KeySpec="AES_256"
@@ -69,7 +72,9 @@ class AwsKmsKeyProvider(KeyProvider):
                 if env_key:
                     self._cached_kek = base64.b64decode(env_key)
                 else:
-                    self._cached_kek = b"k" * 32
+                    raise KeyProviderError(
+                        f"AWS KMS no configurado ni autenticado para key_id: {self._key_id}"
+                    )
         return self._cached_kek
 
     def get_provider_identifier(self) -> str:
@@ -86,11 +91,20 @@ class VaultTransitKeyProvider(KeyProvider):
 
     def get_kek(self) -> bytes:
         if self._cached_kek is None:
-            env_key = os.environ.get("BOVEDA_VAULT_MOCK_KEY")
-            if env_key:
-                self._cached_kek = base64.b64decode(env_key)
+            if self._vault_client is not None:
+                # Invocación real a Vault transit
+                resp = self._vault_client.secrets.transit.generate_data_key(
+                    name=self._key_name, key_type="plaintext"
+                )
+                self._cached_kek = base64.b64decode(resp["data"]["plaintext"])
             else:
-                self._cached_kek = b"v" * 32
+                env_key = os.environ.get("BOVEDA_VAULT_MOCK_KEY")
+                if env_key:
+                    self._cached_kek = base64.b64decode(env_key)
+                else:
+                    raise KeyProviderError(
+                        f"HashiCorp Vault no configurado ni autenticado para key_name: {self._key_name}"
+                    )
         return self._cached_kek
 
     def get_provider_identifier(self) -> str:

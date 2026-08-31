@@ -167,3 +167,52 @@ def test_dedup_keys_and_synthetic_iv():
     s_nonce2 = compute_synthetic_nonce(ckey2, aad, data2)
     assert len(s_nonce1) == 12
     assert s_nonce1 == s_nonce2
+
+
+def test_tenant_crypto_isolation_and_dedup_oracle_immunity():
+    from boveda.crypto import (
+        compute_content_id,
+        create_tenant_aad,
+        derive_chunk_key,
+        derive_dedup_keys,
+        derive_tenant_kek,
+    )
+
+    master_kek = b"M" * 32
+    tenant_a = "tenant_alpha"
+    tenant_b = "tenant_beta"
+
+    # 1. KEKs de tenants aisladas
+    kek_a = derive_tenant_kek(master_kek, tenant_a)
+    kek_b = derive_tenant_kek(master_kek, tenant_b)
+    assert kek_a != kek_b
+    assert len(kek_a) == 32
+
+    # 2. Claves de deduplicación derivadas con tenant_id
+    k_dedup_a, k_id_a = derive_dedup_keys(master_kek, tenant_id=tenant_a)
+    k_dedup_b, k_id_b = derive_dedup_keys(master_kek, tenant_id=tenant_b)
+
+    assert k_dedup_a != k_dedup_b
+    assert k_id_a != k_id_b
+
+    # 3. Mismo contenido confidencial entre dos inquilinos
+    confidential_data = b"CONFIDENTIAL_RECORD_DATA_BALANCE_$50000"
+
+    content_id_a = compute_content_id(k_id_a, confidential_data)
+    content_id_b = compute_content_id(k_id_b, confidential_data)
+
+    # Inmunidad contra Deduplication Oracle Attack:
+    # A pesar de tener exactamente los mismos datos, los hashes en S3 son completamente distintos
+    assert content_id_a != content_id_b
+
+    # 4. Claves de bloque distintas
+    chunk_key_a = derive_chunk_key(k_dedup_a, confidential_data)
+    chunk_key_b = derive_chunk_key(k_dedup_b, confidential_data)
+    assert chunk_key_a != chunk_key_b
+
+    # 5. AAD con aislamiento de inquilino
+    header = b"HEADER_30_BYTES_TEST_BINARY_12"
+    aad_a = create_tenant_aad(header, tenant_a)
+    aad_b = create_tenant_aad(header, tenant_b)
+    assert aad_a != aad_b
+    assert aad_a.endswith(tenant_a.encode("utf-8"))
