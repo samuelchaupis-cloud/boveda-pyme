@@ -69,10 +69,10 @@ async def read_source(
 
         if proc.returncode != 0 and not shutdown_event.is_set():
             raw_err = b"".join(stderr_buffer).decode(errors="ignore")
-            is_sigpipe = (
-                proc.returncode == -signal.SIGPIPE
-                if hasattr(signal, "SIGPIPE")
-                else proc.returncode in (109, 141)
+            sigpipe_code = -getattr(signal, "SIGPIPE", 13)
+            is_sigpipe = proc.returncode == sigpipe_code or proc.returncode in (
+                109,
+                141,
             )
             if not is_sigpipe:
                 raise SubprocessError(
@@ -83,6 +83,13 @@ async def read_source(
         drain_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await drain_task
+        if proc.returncode is None:
+            with contextlib.suppress(Exception):
+                proc.terminate()
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=3.0)
+                except TimeoutError:
+                    proc.kill()
 
 
 async def compress_encrypt_upload(

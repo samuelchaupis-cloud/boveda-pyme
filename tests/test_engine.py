@@ -154,3 +154,69 @@ async def test_pipeline_mutation_failures():
 
     with pytest.raises(InvalidTag):
         aesgcm.decrypt(nonce, ciphertext, mutated_aad)
+
+
+@pytest.mark.asyncio
+async def test_streaming_edge_cases_and_boundaries():
+    dek = os.urandom(32)
+    snapshot_id = "snap-boundaries-test"
+
+    # 1. Caso 0 bytes (stream vacío)
+    uploads_empty = []
+
+    async def mock_upload_empty(seq, payload, h):
+        uploads_empty.append((seq, payload, h))
+
+    cmd_empty = ["python", "-c", "import sys; sys.stdout.buffer.write(b'')"]
+    shutdown_empty = asyncio.Event()
+    await streaming_pipeline(
+        cmd_empty, snapshot_id, dek, mock_upload_empty, shutdown_empty
+    )
+    assert len(uploads_empty) == 0
+
+    # 2. Caso 1 byte
+    uploads_1b = []
+
+    async def mock_upload_1b(seq, payload, h):
+        uploads_1b.append((seq, payload, h))
+
+    cmd_1b = ["python", "-c", "import sys; sys.stdout.buffer.write(b'Z')"]
+    shutdown_1b = asyncio.Event()
+    await streaming_pipeline(cmd_1b, snapshot_id, dek, mock_upload_1b, shutdown_1b)
+    assert len(uploads_1b) == 1
+    assert uploads_1b[0][0] == 0  # seq 0
+
+    # 3. Caso 2MB exactos (1 chunk exacto)
+    uploads_2mb = []
+
+    async def mock_upload_2mb(seq, payload, h):
+        uploads_2mb.append((seq, payload, h))
+
+    cmd_2mb = [
+        "python",
+        "-c",
+        "import sys; sys.stdout.buffer.write(b'B' * (2 * 1024 * 1024))",
+    ]
+    shutdown_2mb = asyncio.Event()
+    await streaming_pipeline(cmd_2mb, snapshot_id, dek, mock_upload_2mb, shutdown_2mb)
+    assert len(uploads_2mb) == 1
+    assert uploads_2mb[0][0] == 0
+
+    # 4. Caso 2MB + 1 byte (2 chunks)
+    uploads_2mb_plus = []
+
+    async def mock_upload_2mb_plus(seq, payload, h):
+        uploads_2mb_plus.append((seq, payload, h))
+
+    cmd_2mb_plus = [
+        "python",
+        "-c",
+        "import sys; sys.stdout.buffer.write(b'B' * (2 * 1024 * 1024) + b'X')",
+    ]
+    shutdown_2mb_plus = asyncio.Event()
+    await streaming_pipeline(
+        cmd_2mb_plus, snapshot_id, dek, mock_upload_2mb_plus, shutdown_2mb_plus
+    )
+    assert len(uploads_2mb_plus) == 2
+    assert uploads_2mb_plus[0][0] == 0
+    assert uploads_2mb_plus[1][0] == 1

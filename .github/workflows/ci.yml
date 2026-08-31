@@ -1,0 +1,62 @@
+name: CI & Distribution Pipeline
+
+on:
+  push:
+    branches: [ main, master ]
+    tags: [ 'v*.*.*' ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  quality-gates:
+    name: Quality Gates (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-latest, windows-latest, macos-latest ]
+
+    steps:
+      - name: Checkout del Código
+        uses: actions/checkout@v4
+
+      - name: Instalar uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+          enable-cache: true
+
+      - name: Configurar Python 3.12
+        run: uv python install 3.12
+
+      - name: Sincronizar Dependencias
+        run: uv sync --all-groups
+
+      - name: Gate 1 - Ruff Lint & Format
+        run: |
+          uv run ruff check .
+          uv run ruff format --check .
+
+      - name: Gate 2 - Mypy Static Type Checking
+        run: uv run mypy src/
+
+      - name: Gate 3 - Bandit SAST Security Audit
+        run: uv run bandit -r src/ -ll -ii
+
+      - name: Gate 4 - Pytest & Coverage (>=85%)
+        run: uv run pytest tests/ -v --cov=src --cov-fail-under=85 --cov-report=xml --cov-report=term-missing
+
+  build-wheels:
+    name: Build Wheels & SDist
+    needs: quality-gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+      - run: uv python install 3.12
+      - run: uv build
+      - name: Subir Artefactos de Paquete
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-packages
+          path: dist/*

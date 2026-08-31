@@ -1,21 +1,62 @@
 [Unit]
-Description=Boveda-PyME Backup Daemon
-After=network.target
+Description=Boveda-PyME Encrypted Cloud Backup Daemon
+Documentation=https://github.com/samuelchaupis-cloud/boveda-pyme
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
 User=boveda
 Group=boveda
-Environment="BOVEDA_PASSPHRASE=tu-passphrase-segura"
-Environment="S3_BUCKET=tu-bucket"
-Environment="AWS_ACCESS_KEY_ID=tu-key"
-Environment="AWS_SECRET_ACCESS_KEY=tu-secret"
-Environment="S3_ENDPOINT=https://s3.us-east-1.amazonaws.com"
-ExecStart=/usr/local/bin/boveda daemon
+
+# Directorios gestionados automáticamente por systemd con permisos 0700
+StateDirectory=boveda
+StateDirectoryMode=0700
+LogsDirectory=boveda
+LogsDirectoryMode=0700
+CacheDirectory=boveda
+CacheDirectoryMode=0700
+RuntimeDirectory=boveda
+RuntimeDirectoryMode=0700
+
+WorkingDirectory=/var/lib/boveda
+
+# Variables de entorno y configuración
+EnvironmentFile=-/etc/boveda/boveda.env
+ExecStart=/usr/local/bin/boveda daemon --db /var/lib/boveda/snapshots.db
+
+# Resiliencia del ciclo de vida
 Restart=on-failure
 RestartSec=5s
+KillMode=mixed
+TimeoutStopSec=30s
+
+# Cgroups v2: Gestión de Memoria y Throttling (Cota Estricta 45MB)
 MemoryAccounting=yes
+MemoryHigh=38M
 MemoryMax=45M
+MemorySwapMax=0
+
+# Hardening y Aislamiento del Sistema de Archivos
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+NoNewPrivileges=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+# Capacidades POSIX (permite lectura de backups del sistema sin ser root)
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH
+AmbientCapabilities=CAP_DAC_READ_SEARCH
+
+# Límites de Recursos
+LimitNOFILE=65536
 
 [Install]
 WantedBy=multi-user.target
+
