@@ -83,7 +83,7 @@ def test_cli_backup_and_restore_workflow(tmp_path, monkeypatch):
         )
 
         # Backup 1
-        cmd = f'{sys.executable} -c print("test_data_stream")'
+        cmd = f"{sys.executable} -c \"import sys; sys.stdout.write('test_data_stream\\n')\""
         result = runner.invoke(
             main, ["backup", "--db", db_path, "--source", "test-src", "--cmd", cmd]
         )

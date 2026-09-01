@@ -187,3 +187,46 @@ def test_auth_and_rbac_endpoints(client_and_auth):
     )
     assert resp_backup_ok.status_code == 200
     assert resp_backup_ok.json()["status"] == "initiated"
+
+
+def test_server_keys_persistence_and_reload(tmp_path, monkeypatch):
+    from boveda.api import _load_or_create_server_keys
+
+    keys_dir = tmp_path / "data" / "keys"
+    monkeypatch.chdir(tmp_path)
+
+    # 1. Primera invocación: genera y guarda en disco
+    priv1, _pub1 = _load_or_create_server_keys()
+    assert (keys_dir / "server_ed25519.pem").exists()
+
+    # 2. Segunda invocación: debe cargar la clave existente
+    priv2, _pub2 = _load_or_create_server_keys()
+    assert priv1.private_bytes_raw() == priv2.private_bytes_raw()
+
+
+def test_api_snapshots_and_stats_empty_tenant(client_and_auth):
+    client, _ = client_and_auth
+    now = int(time.time())
+    claims_new = TokenClaims(
+        sub="usr_new",
+        tenant_id="tenant_empty_99",
+        role=UserRole.OPERATOR,
+        exp=now + 3600,
+        iat=now,
+        jti="jti_new",
+    )
+    token_new = create_access_token(claims_new, SERVER_PRIVATE_KEY)
+
+    # Lista vacía de snapshots
+    resp_snaps = client.get(
+        "/api/snapshots", headers={"Authorization": f"Bearer {token_new}"}
+    )
+    assert resp_snaps.status_code == 200
+    assert resp_snaps.json() == []
+
+    # Estadísticas en 0
+    resp_stats = client.get(
+        "/api/stats", headers={"Authorization": f"Bearer {token_new}"}
+    )
+    assert resp_stats.status_code == 200
+    assert resp_stats.json()["total_snapshots_completed"] == 0
