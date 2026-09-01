@@ -186,37 +186,37 @@ async def test_streaming_edge_cases_and_boundaries():
     assert len(uploads_1b) == 1
     assert uploads_1b[0][0] == 0  # seq 0
 
-    # 3. Caso 2MB exactos (1 chunk exacto)
-    uploads_2mb = []
+    # 3. Caso 4MB exactos (1 chunk exacto)
+    uploads_4mb = []
 
-    async def mock_upload_2mb(seq, payload, h):
-        uploads_2mb.append((seq, payload, h))
+    async def mock_upload_4mb(seq, payload, h):
+        uploads_4mb.append((seq, payload, h))
 
-    cmd_2mb = [
+    cmd_4mb = [
         "python",
         "-c",
-        "import sys; sys.stdout.buffer.write(b'B' * (2 * 1024 * 1024))",
+        "import sys; sys.stdout.buffer.write(b'B' * (4 * 1024 * 1024))",
     ]
-    shutdown_2mb = asyncio.Event()
-    await streaming_pipeline(cmd_2mb, snapshot_id, dek, mock_upload_2mb, shutdown_2mb)
-    assert len(uploads_2mb) == 1
-    assert uploads_2mb[0][0] == 0
+    shutdown_4mb = asyncio.Event()
+    await streaming_pipeline(cmd_4mb, snapshot_id, dek, mock_upload_4mb, shutdown_4mb)
+    assert len(uploads_4mb) == 1
+    assert uploads_4mb[0][0] == 0
 
-    # 4. Caso 2MB + 1 byte (2 chunks)
-    uploads_2mb_plus = []
+    # 4. Caso 4MB + 1 byte (2 chunks por alcanzar MAX_CHUNK_SIZE)
+    uploads_4mb_plus = []
 
-    async def mock_upload_2mb_plus(seq, payload, h):
-        uploads_2mb_plus.append((seq, payload, h))
+    async def mock_upload_4mb_plus(seq, payload, h):
+        uploads_4mb_plus.append((seq, payload, h))
 
-    cmd_2mb_plus = [
+    cmd_4mb_plus = [
         "python",
         "-c",
-        "import sys; sys.stdout.buffer.write(b'B' * (2 * 1024 * 1024) + b'X')",
+        "import sys; sys.stdout.buffer.write(b'B' * (4 * 1024 * 1024) + b'X')",
     ]
-    shutdown_2mb_plus = asyncio.Event()
+    shutdown_4mb_plus = asyncio.Event()
     await streaming_pipeline(
-        cmd_2mb_plus, snapshot_id, dek, mock_upload_2mb_plus, shutdown_2mb_plus
+        cmd_4mb_plus, snapshot_id, dek, mock_upload_4mb_plus, shutdown_4mb_plus
     )
-    assert len(uploads_2mb_plus) == 2
-    assert uploads_2mb_plus[0][0] == 0
-    assert uploads_2mb_plus[1][0] == 1
+    assert len(uploads_4mb_plus) == 2
+    assert uploads_4mb_plus[0][0] == 0
+    assert uploads_4mb_plus[1][0] == 1

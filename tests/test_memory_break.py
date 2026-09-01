@@ -60,8 +60,8 @@ async def test_500mb_streaming_memory_budget():
     peak_rss_mb = max(peak_rss_mb, final_rss_mb)
 
     # Verificaciones de invariantes de negocio:
-    # 500MB divididos en chunks de 2MB = 250 chunks
-    assert total_chunks == 250
+    # 500MB particionados con FastCDC (1MB-4MB por chunk)
+    assert 120 <= total_chunks <= 500
     assert total_bytes_encrypted > 0
 
     # Aserción estricta de Cgroups / Memoria SRE:

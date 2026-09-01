@@ -9,12 +9,12 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from boveda.connectors import drain_stderr_nonblocking
 from boveda.constants import (
-    CHUNK_SIZE_BYTES,
     MAX_CONCURRENT_UPLOADS,
     PIPELINE_QUEUE_MAXSIZE,
     ZSTD_COMPRESSION_LEVEL,
 )
 from boveda.crypto import NonceGenerator, create_aad, create_chunk_header
+from boveda.fastcdc import FastCDCStreamer
 
 
 class SubprocessError(Exception):
@@ -26,7 +26,7 @@ async def read_source(
     queue: asyncio.Queue[bytes | None],
     shutdown_event: asyncio.Event,
 ):
-    """Ejecuta el origen y alimenta la cola de a chunks de 8MB con drenaje continuo de stderr."""
+    """Ejecuta el origen y alimenta la cola usando FastCDC con drenaje continuo de stderr."""
     proc = await asyncio.create_subprocess_exec(
         *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
     )
@@ -39,29 +39,29 @@ async def read_source(
         drain_stderr_nonblocking(proc.stderr, stderr_buffer)
     )
 
+    fastcdc = FastCDCStreamer()
+    io_read_size = 512 * 1024
+
     try:
         while True:
-            buf = bytearray()
-            while len(buf) < CHUNK_SIZE_BYTES:
-                chunk = await proc.stdout.read(CHUNK_SIZE_BYTES - len(buf))
-                if not chunk:
+            raw_bytes = await proc.stdout.read(io_read_size)
+            is_eof = len(raw_bytes) == 0
+
+            for chunk in fastcdc.feed(raw_bytes, is_eof=is_eof):
+                put_task = asyncio.create_task(queue.put(chunk))
+                wait_task = asyncio.create_task(shutdown_event.wait())
+
+                done, pending = await asyncio.wait(
+                    [put_task, wait_task], return_when=asyncio.FIRST_COMPLETED
+                )
+
+                for p in pending:
+                    p.cancel()
+
+                if wait_task in done:
                     break
-                buf.extend(chunk)
 
-            if not buf:
-                break
-
-            put_task = asyncio.create_task(queue.put(bytes(buf)))
-            wait_task = asyncio.create_task(shutdown_event.wait())
-
-            done, pending = await asyncio.wait(
-                [put_task, wait_task], return_when=asyncio.FIRST_COMPLETED
-            )
-
-            for p in pending:
-                p.cancel()
-
-            if wait_task in done:
+            if is_eof or shutdown_event.is_set():
                 break
 
         await queue.put(None)
