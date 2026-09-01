@@ -1,10 +1,16 @@
 import sys
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, patch
 
 from click.testing import CliRunner
 
 from boveda.cli import main
-from boveda.database import Snapshot, SnapshotChunk, init_db
+from boveda.database import (
+    Configuracion,
+    Snapshot,
+    SnapshotChunk,
+    init_db,
+)
 
 
 def test_cli_init_and_list(tmp_path):
@@ -96,8 +102,8 @@ def test_cli_backup_and_restore_workflow(tmp_path, monkeypatch):
         assert len(snaps) == 2
         snapshot_id = snaps[0].id
 
-        result_list = runner.invoke(main, ["list", "--db", db_path])
-        assert snapshot_id in result_list.output
+    result_list = runner.invoke(main, ["list", "--db", db_path])
+    assert snapshot_id in result_list.output
 
     # Verify tests
     res_verify_no_flag = runner.invoke(main, ["verify", snapshot_id, "--db", db_path])
@@ -151,9 +157,52 @@ def test_cli_daemon_invocation():
 def test_cli_rotate_kek(tmp_path):
     db_path = str(tmp_path / "cli_rotate.db")
     runner = CliRunner()
-    runner.invoke(main, ["init", "--db", db_path])
+    init_res = runner.invoke(main, ["init", "--db", db_path])
+    assert init_res.exit_code == 0
 
-    # Rotate KEK
+    # Poblar 2 snapshots reales cifrados con old_pass
+    Session = init_db(db_path)
+    with Session() as session:
+        from boveda.crypto import (
+            derive_kek,
+            generate_dek_for_snapshot,
+            unwrap_dek,
+        )
+
+        salt_conf = session.query(Configuracion).filter_by(clave="master_salt").first()
+        assert salt_conf is not None
+        old_salt_val = str(salt_conf.valor)
+        old_kek = derive_kek("old_pass", old_salt_val)
+
+        dek_raw1, enc1, nonce1, tag1 = generate_dek_for_snapshot(old_kek, "snap-rot-1")
+        dek_raw2, enc2, nonce2, tag2 = generate_dek_for_snapshot(old_kek, "snap-rot-2")
+
+        s1 = Snapshot(
+            id="snap-rot-1",
+            estado="COMPLETED",
+            tipo="DIARIO",
+            source_type="cmd",
+            source_identifier="db1",
+            encrypted_dek=enc1,
+            dek_nonce=nonce1,
+            dek_tag=tag1,
+            timestamp=datetime.now(UTC),
+        )
+        s2 = Snapshot(
+            id="snap-rot-2",
+            estado="COMPLETED",
+            tipo="SEMANAL",
+            source_type="cmd",
+            source_identifier="db2",
+            encrypted_dek=enc2,
+            dek_nonce=nonce2,
+            dek_tag=tag2,
+            timestamp=datetime.now(UTC),
+        )
+        session.add_all([s1, s2])
+        session.commit()
+
+    # Ejecutar comando rotate-kek
     result = runner.invoke(
         main,
         ["rotate-kek", "--db", db_path],
@@ -161,3 +210,33 @@ def test_cli_rotate_kek(tmp_path):
     )
     assert result.exit_code == 0
     assert "Rotación de KEK completada con éxito" in result.output
+    assert "Snapshots re-envueltos: 2" in result.output
+
+    # Validar que los DEKs se pueden descifrar con new_pass y coinciden exactamente con dek_raw
+    with Session() as session:
+        salt_new = session.query(Configuracion).filter_by(clave="master_salt").first()
+        assert salt_new is not None
+        assert salt_new.valor != old_salt_val  # Salt debe haber rotado
+        new_kek = derive_kek("new_pass", salt_new.valor)
+
+        snap1_after = session.get(Snapshot, "snap-rot-1")
+        assert snap1_after is not None
+        unwrapped1 = unwrap_dek(
+            new_kek,
+            snap1_after.encrypted_dek,
+            snap1_after.dek_nonce,
+            snap1_after.dek_tag,
+            "snap-rot-1",
+        )
+        assert unwrapped1 == dek_raw1
+
+        snap2_after = session.get(Snapshot, "snap-rot-2")
+        assert snap2_after is not None
+        unwrapped2 = unwrap_dek(
+            new_kek,
+            snap2_after.encrypted_dek,
+            snap2_after.dek_nonce,
+            snap2_after.dek_tag,
+            "snap-rot-2",
+        )
+        assert unwrapped2 == dek_raw2

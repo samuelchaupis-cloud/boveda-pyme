@@ -9,9 +9,9 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
-ARGON2_TIME_COST = 3
-ARGON2_MEMORY_COST = 65536
-ARGON2_PARALLELISM = 4
+ARGON2_TIME_COST = 5
+ARGON2_MEMORY_COST = 32768  # 32 MiB calibrado para cota presupuestada de 45MB RAM RSS
+ARGON2_PARALLELISM = 2
 MASTER_KEY_LENGTH = 32
 
 

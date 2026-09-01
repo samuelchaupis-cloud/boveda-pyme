@@ -3,13 +3,12 @@
 import asyncio
 import time
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Coroutine
 from enum import StrEnum
-from typing import Any
+from typing import Any, ParamSpec, TypeVar
 
-from pydantic import Field
-
-from boveda.schemas import StrictBaseModel
+P = ParamSpec("P")
+T = TypeVar("T")
 
 
 class CircuitState(StrEnum):
@@ -19,26 +18,37 @@ class CircuitState(StrEnum):
 
 
 class StorageDestination(StrEnum):
-    PRIMARY = "PRIMARY"
-    SECONDARY = "SECONDARY"
-    OUTBOX = "OUTBOX"
+    PRIMARY = "primary"
+    SECONDARY = "secondary"
+    OUTBOX = "outbox"
 
 
-class CircuitBreakerOpenError(Exception):
-    """Excepción lanzada cuando el Circuit Breaker está en estado OPEN y rechaza peticiones."""
+class CircuitBreakerError(Exception):
+    """Excepción base para errores del Circuit Breaker."""
 
 
-class CircuitBreakerConfig(StrictBaseModel):
-    """Configuración inmutable del Circuit Breaker."""
+class CircuitBreakerOpenError(CircuitBreakerError):
+    """Lanzada cuando se invoca una operación sobre un circuito en estado OPEN."""
 
-    failure_threshold: int = Field(default=3, ge=1, le=20)
-    failure_window_seconds: float = Field(default=30.0, gt=0.0, le=300.0)
-    cooldown_seconds: float = Field(default=60.0, gt=0.0, le=600.0)
-    half_open_success_threshold: int = Field(default=1, ge=1, le=5)
+
+class CircuitBreakerConfig:
+    """Configuración de umbrales y tiempos para la FSM del Circuit Breaker."""
+
+    def __init__(
+        self,
+        failure_threshold: int = 3,
+        failure_window_seconds: float = 30.0,
+        cooldown_seconds: float = 60.0,
+        half_open_success_threshold: int = 1,
+    ) -> None:
+        self.failure_threshold = failure_threshold
+        self.failure_window_seconds = failure_window_seconds
+        self.cooldown_seconds = cooldown_seconds
+        self.half_open_success_threshold = half_open_success_threshold
 
 
 class CircuitBreaker:
-    """FSM asíncrona y atómica para Circuit Breakers con sondeo canario."""
+    """Máquina de estados finita asíncrona para protección contra caídas en cascada."""
 
     def __init__(self, name: str, config: CircuitBreakerConfig | None = None) -> None:
         self.name = name
@@ -58,8 +68,18 @@ class CircuitBreaker:
     def failure_count(self) -> int:
         return len(self._failure_timestamps)
 
-    async def call(self, func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    @property
+    def canary_in_flight(self) -> bool:
+        return self._canary_in_flight
+
+    async def call(
+        self,
+        func: Callable[P, Coroutine[Any, Any, T]],
+        *args: P.args,
+        **kwargs: P.kwargs,
+    ) -> T:
         """Ejecuta una corutina a través del Circuit Breaker con conmutación de estado atómica."""
+        canary_claimed = False
         async with self._lock:
             now = time.monotonic()
 
@@ -81,15 +101,26 @@ class CircuitBreaker:
                         f"CircuitBreaker '{self.name}' está HALF_OPEN con sonda canaria en tránsito."
                     )
                 self._canary_in_flight = True
+                canary_claimed = True
 
         try:
             # Ejecución fuera del cerrojo para no bloquear otras corutinas en CLOSED
             result = await func(*args, **kwargs)
             await self._record_success()
+            canary_claimed = False
             return result
         except Exception:
             await self._record_failure()
+            canary_claimed = False
             raise
+        finally:
+            if canary_claimed:
+                # Si la corutina fue cancelada externamente (asyncio.CancelledError) o falló antes de record
+                async with self._lock:
+                    if self._state == CircuitState.HALF_OPEN and self._canary_in_flight:
+                        self._canary_in_flight = False
+                        self._state = CircuitState.OPEN
+                        self._opened_at = time.monotonic()
 
     async def _record_success(self) -> None:
         """Registra una ejecución exitosa."""

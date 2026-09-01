@@ -141,3 +141,92 @@ async def test_multi_cloud_router_failover_cascade():
     assert dest2 == StorageDestination.OUTBOX
     assert res2 == "staged-in-outbox"
     assert r2_cb.state == CircuitState.OPEN
+
+
+@pytest.mark.asyncio
+async def test_circuit_breaker_success_in_closed_clears_failures():
+    cb = CircuitBreaker(
+        name="test-s3", config=CircuitBreakerConfig(failure_threshold=3)
+    )
+    mock_fail = AsyncMock(side_effect=ConnectionError("Fallo 1"))
+    mock_ok = AsyncMock(return_value="ok")
+
+    # 2 fallos (no abre el circuito)
+    for _ in range(2):
+        with pytest.raises(ConnectionError):
+            await cb.call(mock_fail)
+    assert cb.failure_count == 2
+    assert cb.state == CircuitState.CLOSED
+
+    # 1 éxito -> DEBE resetear el contador de fallos a 0
+    res = await cb.call(mock_ok)
+    assert res == "ok"
+    assert cb.failure_count == 0
+
+    # 2 fallos subsecuentes no deben abrir el circuito si se reseteó
+    for _ in range(2):
+        with pytest.raises(ConnectionError):
+            await cb.call(mock_fail)
+    assert cb.state == CircuitState.CLOSED
+
+
+@pytest.mark.asyncio
+async def test_circuit_breaker_half_open_cancellation_releases_canary():
+    cb = CircuitBreaker(
+        name="test-s3",
+        config=CircuitBreakerConfig(failure_threshold=1, cooldown_seconds=0.05),
+    )
+    mock_fail = AsyncMock(side_effect=ConnectionError("Fail"))
+    with pytest.raises(ConnectionError):
+        await cb.call(mock_fail)
+    assert cb.state == CircuitState.OPEN
+
+    await asyncio.sleep(0.08)
+
+    # Simular una corutina lenta que es cancelada externamente (timeout)
+    async def slow_canary():
+        await asyncio.sleep(1.0)
+        return "slow"
+
+    task = asyncio.create_task(cb.call(slow_canary))
+    await asyncio.sleep(0.01)  # Asegurar que el task inicia y toma la sonda
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    # Tras la cancelación, la sonda canaria debe haberse liberado y reabierto el circuito
+    assert not cb.canary_in_flight
+    assert cb.state == CircuitState.OPEN
+
+
+@pytest.mark.asyncio
+async def test_circuit_breaker_half_open_concurrent_canaries_blocked():
+    cb = CircuitBreaker(
+        name="test-s3",
+        config=CircuitBreakerConfig(failure_threshold=1, cooldown_seconds=0.05),
+    )
+    mock_fail = AsyncMock(side_effect=ConnectionError("Fail"))
+    with pytest.raises(ConnectionError):
+        await cb.call(mock_fail)
+    assert cb.state == CircuitState.OPEN
+
+    await asyncio.sleep(0.08)
+
+    # Lanzar sonda lenta
+    canary_started = asyncio.Event()
+
+    async def blocking_canary():
+        canary_started.set()
+        await asyncio.sleep(0.2)
+        return "canary-done"
+
+    canary_task = asyncio.create_task(cb.call(blocking_canary))
+    await canary_started.wait()
+
+    # Segunda llamada concurrente en HALF_OPEN DEBE ser rechazada de inmediato con CircuitBreakerOpenError
+    mock_secondary = AsyncMock(return_value="secondary")
+    with pytest.raises(CircuitBreakerOpenError):
+        await cb.call(mock_secondary)
+
+    await canary_task
+    assert cb.state == CircuitState.CLOSED

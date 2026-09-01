@@ -88,3 +88,12 @@ class RestoreJobRequest(StrictBaseModel):
     tenant: TenantContext
     snapshot_id: Annotated[str, Field(min_length=3, max_length=64)]
     destination_file: Annotated[str, Field(min_length=1, max_length=512)]
+
+    @field_validator("destination_file")
+    @classmethod
+    def validate_destination_file(cls, v: str) -> str:
+        if "\x00" in v or ".." in v.replace("\\", "/").split("/"):
+            raise ValueError(
+                "INVARIANTE_VIOLADA: Intento de Path Traversal o caracteres nulos en destination_file."
+            )
+        return v

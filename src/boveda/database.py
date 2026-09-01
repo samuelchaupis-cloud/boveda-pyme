@@ -1,10 +1,14 @@
 import os
 import re
+import threading
 from datetime import UTC, datetime
+from enum import StrEnum
+from typing import Any
 
 from sqlalchemy import (
     Boolean,
     DateTime,
+    Engine,
     ForeignKey,
     Integer,
     LargeBinary,
@@ -177,6 +181,21 @@ class SnapshotChunk(Base):
 Bloque = SnapshotChunk
 
 
+class SnapshotState(StrEnum):
+    PENDING = "PENDING"
+    RUNNING = "RUNNING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+    PURGED = "PURGED"
+
+
+class ChunkState(StrEnum):
+    ACTIVE = "ACTIVE"
+    PENDING_DELETE = "PENDING_DELETE"
+    PURGING_S3 = "PURGING_S3"
+    CORRUPT = "CORRUPT"
+
+
 class Configuracion(Base):
     __tablename__ = "configuracion"
 
@@ -223,6 +242,32 @@ TRIGGERS_DDL = [
     END;
     """,
     """
+    CREATE TRIGGER IF NOT EXISTS trg_snapshot_chunks_prevent_update
+    BEFORE UPDATE ON snapshot_chunks
+    FOR EACH ROW
+    BEGIN
+        SELECT RAISE(ABORT, 'INVARIANTE_VIOLADA: Los enlaces de snapshot_chunks son estrictamente inmutables.');
+    END;
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS trg_snapshots_prevent_tamper
+    BEFORE UPDATE OF tipo, source_type, source_identifier, id, timestamp ON snapshots
+    FOR EACH ROW
+    WHEN OLD.estado = 'COMPLETED'
+    BEGIN
+        SELECT RAISE(ABORT, 'INVARIANTE_VIOLADA: Los metadatos y origen del snapshot completado son inmutables.');
+    END;
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS trg_snapshots_prevent_unauthorized_delete
+    BEFORE DELETE ON snapshots
+    FOR EACH ROW
+    WHEN OLD.estado IN ('COMPLETED', 'RUNNING')
+    BEGIN
+        SELECT RAISE(ABORT, 'INVARIANTE_VIOLADA: Prohibido eliminar snapshots activos o completados sin proceso formal de retención.');
+    END;
+    """,
+    """
     CREATE TRIGGER IF NOT EXISTS trg_chunk_pool_prevent_payload_mutation
     BEFORE UPDATE OF hash_sha256, storage_key, size_compressed, size_encrypted ON chunk_pool
     FOR EACH ROW
@@ -241,31 +286,47 @@ TRIGGERS_DDL = [
     """,
 ]
 
-
-def get_engine(db_path: str):
-    engine = create_engine(
-        f"sqlite:///{db_path}", connect_args={"timeout": 15}, pool_pre_ping=True
-    )
-
-    @event.listens_for(engine, "connect")
-    def set_sqlite_pragmas(dbapi_conn, connection_record):
-        cursor = dbapi_conn.cursor()
-        cursor.execute("PRAGMA journal_mode=WAL")
-        cursor.execute("PRAGMA busy_timeout=5000")
-        cursor.execute("PRAGMA foreign_keys=ON")
-        cursor.execute("PRAGMA synchronous=NORMAL")
-        cursor.close()
-
-    return engine
+_ENGINE_CACHE: dict[str, Engine] = {}
+_ENGINE_LOCK = threading.Lock()
 
 
-def verify_db_integrity(session):
+def get_engine(db_path: str) -> Engine:
+    """Retorna un Engine de SQLAlchemy configurado con WAL, timeout de 30s y BEGIN IMMEDIATE."""
+    norm_path = os.path.abspath(db_path)
+    with _ENGINE_LOCK:
+        if norm_path in _ENGINE_CACHE:
+            return _ENGINE_CACHE[norm_path]
+
+        engine = create_engine(
+            f"sqlite:///{norm_path}",
+            connect_args={"timeout": 30},
+            pool_pre_ping=True,
+        )
+
+        @event.listens_for(engine, "connect")
+        def set_sqlite_pragmas(dbapi_conn, connection_record):
+            cursor = dbapi_conn.cursor()
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA busy_timeout=30000")
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.execute("PRAGMA synchronous=NORMAL")
+            cursor.close()
+
+        @event.listens_for(engine, "begin")
+        def do_begin(conn):
+            conn.exec_driver_sql("BEGIN IMMEDIATE")
+
+        _ENGINE_CACHE[norm_path] = engine
+        return engine
+
+
+def verify_db_integrity(session: Any) -> None:
     result = session.execute(text("PRAGMA integrity_check")).scalar()
     if result != "ok":
         raise ValueError(f"bd_corrupta: {result}")
 
 
-def init_db(db_path: str):
+def init_db(db_path: str) -> sessionmaker:
     engine = get_engine(db_path)
     Base.metadata.create_all(engine)
     with engine.connect() as conn:

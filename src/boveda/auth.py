@@ -5,6 +5,7 @@ import json
 import secrets
 import threading
 import time
+from collections import OrderedDict
 from enum import StrEnum
 
 from cryptography.exceptions import InvalidSignature
@@ -34,7 +35,7 @@ class TokenClaims(StrictBaseModel):
     iss: str = Field(default="boveda-pyme:auth")
     sub: str
     aud: str = Field(default="boveda-pyme:api")
-    tenant_id: str
+    tenant_id: str = Field(pattern=r"^[a-zA-Z0-9_-]{3,36}$")
     role: UserRole
     exp: int
     iat: int
@@ -92,49 +93,72 @@ def verify_access_token(
     signing_input = f"{header_b64}.{payload_b64}".encode("ascii")
 
     try:
+        header_bytes = _b64url_decode(header_b64)
         signature = _b64url_decode(signature_b64)
         payload_bytes = _b64url_decode(payload_b64)
     except Exception as exc:
         raise TokenAuthError("Error al decodificar base64url del token.") from exc
 
-    # 1. Verificar firma criptográfica Ed25519
+    # 1. Validar encabezado RFC 7519
+    try:
+        header_dict = json.loads(header_bytes.decode("utf-8"))
+        if header_dict.get("alg") != "EdDSA" or header_dict.get("typ") != "JWT":
+            raise TokenAuthError("Encabezado JWT inválido o algoritmo no permitido.")
+    except Exception as exc:
+        if isinstance(exc, TokenAuthError):
+            raise
+        raise TokenAuthError("Encabezado de token malformado.") from exc
+
+    # 2. Verificar firma criptográfica Ed25519
     try:
         public_key.verify(signature, signing_input)
     except InvalidSignature as exc:
         raise TokenAuthError("Firma de token inválida.") from exc
 
-    # 2. Deserializar claims a Pydantic v2
+    # 3. Deserializar claims a Pydantic v2
     try:
         claims = TokenClaims.model_validate_json(payload_bytes.decode("utf-8"))
     except Exception as exc:
         raise TokenAuthError("Claims de token inválidos.") from exc
 
-    # 3. Validar expiración temporal
+    # 4. Validar expiración y emisor/audiencia
     now = int(time.time())
     if claims.exp < now:
         raise TokenAuthError("Token expirado.")
+    if claims.iss != "boveda-pyme:auth":
+        raise TokenAuthError(f"Emisor no confiable: {claims.iss}")
+    if claims.aud != "boveda-pyme:api":
+        raise TokenAuthError(f"Audiencia inválida: {claims.aud}")
 
     return claims
 
 
 class TicketStore:
-    """Almacén en memoria de tickets efímeros de un solo uso para SSE y WebSockets."""
+    """Almacén en memoria de tickets efímeros de un solo uso con capacidad acotada y desalojo FIFO."""
 
-    def __init__(self) -> None:
-        self._tickets: dict[str, tuple[TokenClaims, float]] = {}
+    def __init__(self, max_capacity: int = 1000) -> None:
+        self.max_capacity = max_capacity
+        self._tickets: OrderedDict[str, tuple[TokenClaims, float]] = OrderedDict()
         self._lock = threading.Lock()
 
     def create_ticket(self, claims: TokenClaims, ttl_seconds: float = 30.0) -> str:
         """Genera un ticket criptográfico efímero de alta entropía (256 bits)."""
         ticket_id = secrets.token_urlsafe(32)
-        expires_at = time.time() + ttl_seconds
+        expires_at = time.monotonic() + ttl_seconds
 
         with self._lock:
-            # Purga perezosa de tickets expirados
-            now = time.time()
-            expired_keys = [k for k, (_, exp) in self._tickets.items() if exp < now]
-            for k in expired_keys:
-                del self._tickets[k]
+            now = time.monotonic()
+            # 1. Purga O(K) rápida de tickets expirados al frente de la cola
+            while self._tickets:
+                _first_key, (_, exp) = next(iter(self._tickets.items()))
+                if exp < now:
+                    self._tickets.popitem(last=False)
+                else:
+                    break
+
+            # 2. Desalojo estricto FIFO si se alcanza la capacidad máxima
+            if len(self._tickets) >= self.max_capacity:
+                self._tickets.popitem(last=False)
 
             self._tickets[ticket_id] = (claims, expires_at)
 
@@ -149,7 +173,7 @@ class TicketStore:
             raise InvalidTicketError("Ticket inexistente o ya consumido.")
 
         claims, expires_at = entry
-        if time.time() > expires_at:
+        if time.monotonic() > expires_at:
             raise InvalidTicketError("Ticket expirado.")
 
         return claims

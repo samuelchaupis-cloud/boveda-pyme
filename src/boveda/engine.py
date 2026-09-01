@@ -57,6 +57,8 @@ async def read_source(
 
                 for p in pending:
                     p.cancel()
+                if pending:
+                    await asyncio.gather(*pending, return_exceptions=True)
 
                 if wait_task in done:
                     break
@@ -64,7 +66,21 @@ async def read_source(
             if is_eof or shutdown_event.is_set():
                 break
 
-        await queue.put(None)
+        if not shutdown_event.is_set():
+            try:
+                put_sentinel = asyncio.create_task(queue.put(None))
+                wait_shutdown = asyncio.create_task(shutdown_event.wait())
+                done, pending = await asyncio.wait(
+                    [put_sentinel, wait_shutdown],
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                for p in pending:
+                    p.cancel()
+                if pending:
+                    await asyncio.gather(*pending, return_exceptions=True)
+            except Exception:
+                pass
+
         await proc.wait()
 
         if proc.returncode != 0 and not shutdown_event.is_set():
@@ -116,6 +132,8 @@ async def compress_encrypt_upload(
 
         for p in pending:
             p.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
 
         if wait_task in done:
             break
@@ -140,6 +158,9 @@ async def compress_encrypt_upload(
             try:
                 if not shutdown_event.is_set():
                     await upload_callback(seq, payload, h)
+            except Exception:
+                shutdown_event.set()
+                raise
             finally:
                 upload_semaphore.release()
 
@@ -150,7 +171,11 @@ async def compress_encrypt_upload(
         chunk_seq += 1
 
     if background_tasks:
-        await asyncio.gather(*background_tasks, return_exceptions=True)
+        results = await asyncio.gather(*background_tasks, return_exceptions=True)
+        for r in results:
+            if isinstance(r, Exception):
+                shutdown_event.set()
+                raise r
 
 
 async def streaming_pipeline(

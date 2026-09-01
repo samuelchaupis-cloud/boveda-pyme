@@ -6,7 +6,6 @@ import os
 from abc import ABC, abstractmethod
 from typing import Any
 
-from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from boveda.crypto import (
@@ -123,7 +122,6 @@ def rotate_kek_in_database(
     """
     rotated_count = 0
 
-    session.execute(text("BEGIN IMMEDIATE"))
     snapshots = (
         session.query(Snapshot)
         .filter(Snapshot.estado.in_(["COMPLETED", "EXPIRED"]))

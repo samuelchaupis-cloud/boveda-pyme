@@ -3,7 +3,7 @@ import hashlib
 import logging
 import os
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -19,7 +19,7 @@ from tenacity import (
     wait_random,
 )
 
-from boveda.database import Snapshot
+from boveda.database import Snapshot, SnapshotState
 
 log = logging.getLogger(__name__)
 
@@ -50,9 +50,11 @@ def upload_part(
     )
 
 
-def cleanup_in_progress_snapshots(session, s3_client, bucket: str):
+def cleanup_in_progress_snapshots(session: Any, s3_client: Any, bucket: str) -> None:
     """Al arrancar, limpia snapshots que quedaron en estado RUNNING."""
-    stale = session.query(Snapshot).filter(Snapshot.estado == "RUNNING").all()
+    stale = (
+        session.query(Snapshot).filter(Snapshot.estado == SnapshotState.RUNNING).all()
+    )
     for snap in stale:
         log.warning(f"snapshot_huerfano_detectado snapshot_id={snap.id}")
         if snap.multipart_upload_id:
@@ -61,7 +63,7 @@ def cleanup_in_progress_snapshots(session, s3_client, bucket: str):
             abort_multipart_upload(
                 s3_client, bucket, storage_key, snap.multipart_upload_id
             )
-        snap.estado = "FAILED"
+        snap.estado = SnapshotState.FAILED
         snap.error_detail = "Proceso interrumpido abruptamente (crash/OOM kill previo)"
     session.commit()
 
@@ -211,7 +213,7 @@ class TransactionalOutbox:
 
 async def drain_outbox_queue(
     engine: Engine,
-    uploader_func: Callable[..., Any],
+    uploader_func: Callable[[str, str, bytes], Awaitable[Any]],
     max_items: int = 10,
 ) -> int:
     """Drena chunks pendientes del Outbox con reclamación pesimista y backoff exponencial."""
@@ -221,7 +223,8 @@ async def drain_outbox_queue(
             text("""
                 SELECT id, tenant_id, storage_key, payload_encrypted_path, attempts
                 FROM outbox_chunks
-                WHERE state = 'PENDING' AND next_retry_at <= strftime('%Y-%m-%d %H:%M:%f', 'now', 'utc')
+                WHERE (state = 'PENDING' AND next_retry_at <= strftime('%Y-%m-%d %H:%M:%f', 'now', 'utc'))
+                   OR (state = 'DRAINING' AND updated_at <= datetime('now', '-15 minutes'))
                 ORDER BY created_at ASC
                 LIMIT :limit
             """),
@@ -256,10 +259,7 @@ async def drain_outbox_queue(
 
             await uploader_func(tenant_id, storage_key, payload)
 
-            # Éxito: eliminar archivo y marcar PROCESSED
-            if staged_path.exists():
-                staged_path.unlink(missing_ok=True)
-
+            # 1. Éxito: Confirmar atómicamente en SQLite PRIMERO (Store-and-Forward Invariant)
             with engine.connect() as conn:
                 conn.execute(text("BEGIN IMMEDIATE"))
                 conn.execute(
@@ -271,7 +271,13 @@ async def drain_outbox_queue(
                     {"id": chunk_id},
                 )
                 conn.commit()
+
+            # 2. Únicamente tras confirmar la transacción en SQLite, eliminar el archivo físico en staging
+            if staged_path.exists():
+                staged_path.unlink(missing_ok=True)
+
             processed_count += 1
+
         except Exception as exc:
             new_attempts = attempts + 1
             new_state = (

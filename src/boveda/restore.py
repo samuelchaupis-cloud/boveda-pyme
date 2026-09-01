@@ -1,4 +1,5 @@
 import hashlib
+from collections.abc import Callable, Iterable
 from typing import IO
 
 import zstandard as zstd
@@ -6,7 +7,7 @@ from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from boveda.crypto import create_aad, parse_chunk_header, unwrap_dek
-from boveda.database import Bloque, Snapshot
+from boveda.database import Bloque, Snapshot, SnapshotState
 
 
 class IntegrityError(Exception):
@@ -20,14 +21,14 @@ class RestoreError(Exception):
 def restore_snapshot(
     snapshot: Snapshot,
     kek: bytes,
-    bloques: list[Bloque],
+    bloques: Iterable[Bloque],
     output: IO[bytes],
-    download_callback,
-):
+    download_callback: Callable[[str], bytes],
+) -> None:
     """
-    Restaura un snapshot verificando bloque a bloque.
+    Restaura un snapshot verificando bloque a bloque en streaming acotado.
     """
-    if snapshot.estado != "COMPLETED":
+    if snapshot.estado != SnapshotState.COMPLETED:
         raise RestoreError("Snapshot no está COMPLETED")
 
     try:
@@ -44,11 +45,22 @@ def restore_snapshot(
         )
 
     aesgcm = AESGCM(dek)
-    dctx = zstd.ZstdDecompressor().stream_writer(output)
 
-    # bloques must be sorted by chunk_seq
-    for bloque in sorted(bloques, key=lambda b: b.chunk_seq):
+    # Si se pasa una lista no ordenada, ordenar; si es un generador/iterable streamed, consumir en orden
+    bloque_iter = (
+        sorted(bloques, key=lambda b: b.chunk_seq)
+        if isinstance(bloques, list)
+        else bloques
+    )
+
+    dctx = zstd.ZstdDecompressor().stream_writer(output, closefd=False)
+    for bloque in bloque_iter:
         raw = download_callback(bloque.storage_key)
+
+        if len(raw) < 26:
+            raise IntegrityError(
+                f"Chunk {bloque.chunk_seq} truncado (tamaño {len(raw)} < 26 bytes)"
+            )
 
         if hashlib.sha256(raw).hexdigest() != bloque.hash_sha256:
             raise IntegrityError(f"SHA-256 mismatch en chunk {bloque.chunk_seq}")
@@ -79,3 +91,4 @@ def restore_snapshot(
         dctx.write(plaintext)
 
     dctx.flush()
+

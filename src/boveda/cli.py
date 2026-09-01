@@ -11,9 +11,11 @@ from boveda.crypto import derive_kek, generate_dek_for_snapshot, generate_master
 from boveda.database import (
     Bloque,
     ChunkPool,
+    ChunkState,
     Configuracion,
     Snapshot,
     SnapshotChunk,
+    SnapshotState,
     init_db,
 )
 from boveda.engine import streaming_pipeline
@@ -191,7 +193,7 @@ def backup(db, tipo, source, cmd):
 
         snapshot = Snapshot(
             id=snapshot_id,
-            estado="IN_PROGRESS",
+            estado=SnapshotState.RUNNING,
             tipo=tipo,
             source_type="cmd",
             source_identifier=source,
@@ -233,21 +235,24 @@ def backup(db, tipo, source, cmd):
                                     size_compressed=len(payload) - 26,
                                     size_encrypted=len(payload) - 26,
                                     ref_count=0,
-                                    state="ACTIVE",
+                                    state=ChunkState.ACTIVE,
                                 )
                                 local_session.add(new_pool)
                                 local_session.commit()
                                 return storage_key, True
                             else:
+                                needs_reupload = (
+                                    pool_entry.state == ChunkState.PURGING_S3
+                                )
                                 if pool_entry.state in (
-                                    "PENDING_DELETE",
-                                    "PURGING_S3",
+                                    ChunkState.PENDING_DELETE,
+                                    ChunkState.PURGING_S3,
                                 ):
-                                    pool_entry.state = "ACTIVE"
+                                    pool_entry.state = ChunkState.ACTIVE
                                     pool_entry.purge_scheduled_at = None
                                 storage_key = pool_entry.storage_key
                                 local_session.commit()
-                                return storage_key, False
+                                return storage_key, needs_reupload
 
                     storage_key, is_new = await asyncio.to_thread(_db_check_and_prepare)
 
@@ -279,7 +284,7 @@ def backup(db, tipo, source, cmd):
 
         try:
             asyncio.run(run_pipeline())
-            snapshot.estado = "COMPLETED"
+            snapshot.estado = SnapshotState.COMPLETED
             snapshot.completed_at = datetime.now(UTC)
             session.commit()
             click.echo(f"Backup completado. Snapshot: {snapshot_id}")
@@ -291,7 +296,7 @@ def backup(db, tipo, source, cmd):
             session.rollback()
             snapshot = session.get(Snapshot, snapshot_id)
             if snapshot:
-                snapshot.estado = "FAILED"
+                snapshot.estado = SnapshotState.FAILED
                 snapshot.error_detail = str(e)[:500]
                 session.commit()
             click.echo(f"Error en streaming: {e}", err=True)

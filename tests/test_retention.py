@@ -31,10 +31,12 @@ def test_gfs_classification():
 
     expired = classify_snapshots(snapshots, now)
 
-    assert len(expired) > 0
-    assert len(expired) < 40
+    # Invariante GFS: 7 diarios + 4 semanales + 1 mensual previo = 12 preservados; 40 - 12 = 28 expirados
+    assert len(expired) == 28
+    assert len(snapshots) - len(expired) == 12
 
-    # Comprobar que los más recientes nunca están expirados
+    # Comprobar que los 7 más recientes nunca están expirados
+
     expired_ids = {s.id for s in expired}
     for i in range(7):
         assert f"snap-{i}" not in expired_ids
