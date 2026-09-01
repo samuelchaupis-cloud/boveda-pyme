@@ -1,0 +1,8 @@
+# Global code owners
+* @samuelchaupis-cloud
+
+# CI/CD y Gobernanza
+/.github/ @samuelchaupis-cloud
+/.agents/ @samuelchaupis-cloud
+/.pre-commit-config.yaml @samuelchaupis-cloud
+/pyproject.toml @samuelchaupis-cloud

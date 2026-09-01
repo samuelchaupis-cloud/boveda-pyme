@@ -1,11 +1,57 @@
+import asyncio
+import json
 import sys
 
-from fastapi import FastAPI, Response
+from fastapi import Depends, FastAPI, HTTPException, Query, Response
+from fastapi.responses import StreamingResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
+from boveda.auth import (
+    InvalidTicketError,
+    TicketStore,
+    TokenAuthError,
+    TokenClaims,
+    UserRole,
+    generate_ed25519_keypair,
+    verify_access_token,
+)
 from boveda.database import ChunkPool, Snapshot, SnapshotChunk, init_db
 
 app = FastAPI(title="Bóveda PyME Dashboard", version="1.0.0")
 Session = init_db("snapshots.db")
+
+# Claves asimétricas Ed25519 del servidor y almacén efímero de tickets
+SERVER_PRIVATE_KEY, SERVER_PUBLIC_KEY = generate_ed25519_keypair()
+ticket_store = TicketStore()
+
+security = HTTPBearer(auto_error=False)
+
+
+async def get_current_claims(
+    credentials: HTTPAuthorizationCredentials | None = Depends(security),
+) -> TokenClaims:
+    """Extrae y valida el token JWT asimétrico Ed25519."""
+    if credentials is None:
+        raise HTTPException(status_code=401, detail="Credenciales no proporcionadas.")
+    try:
+        return verify_access_token(credentials.credentials, SERVER_PUBLIC_KEY)
+    except TokenAuthError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+
+
+def require_roles(*allowed_roles: UserRole):
+    """Dependencia de FastAPI para control de acceso basado en roles (RBAC)."""
+
+    def role_checker(
+        claims: TokenClaims = Depends(get_current_claims),
+    ) -> TokenClaims:
+        if claims.role not in allowed_roles:
+            raise HTTPException(
+                status_code=403, detail="Permisos insuficientes para este rol."
+            )
+        return claims
+
+    return role_checker
 
 
 def _get_process_rss_bytes() -> int:
@@ -54,6 +100,48 @@ def read_root():
     return {"message": "Bóveda PyME API en línea"}
 
 
+@app.post("/auth/ws-ticket")
+def create_websocket_ticket(claims: TokenClaims = Depends(get_current_claims)):
+    """Genera un ticket efímero de un solo uso (30s) para SSE o WebSockets."""
+    ticket_id = ticket_store.create_ticket(claims, ttl_seconds=30.0)
+    return {"ticket": ticket_id, "expires_in_seconds": 30}
+
+
+@app.get("/api/events/sse")
+async def sse_events(ticket: str = Query(...)):
+    """Canjea atómicamente un ticket efímero y transmite Server-Sent Events (SSE)."""
+    try:
+        claims = ticket_store.consume_ticket(ticket)
+    except InvalidTicketError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+
+    async def event_generator():
+        connect_data = {
+            "status": "connected",
+            "tenant_id": claims.tenant_id,
+            "sub": claims.sub,
+        }
+        yield f"event: connect\ndata: {json.dumps(connect_data)}\n\n"
+        await asyncio.sleep(0.01)
+        yield "event: ping\ndata: {}\n\n"
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+@app.post("/api/backup")
+def trigger_backup(
+    claims: TokenClaims = Depends(
+        require_roles(UserRole.TENANT_ADMIN, UserRole.OPERATOR)
+    ),
+):
+    """Endpoint protegido para iniciar un respaldo (requiere rol TenantAdmin u Operator)."""
+    return {
+        "status": "initiated",
+        "tenant_id": claims.tenant_id,
+        "initiated_by": claims.sub,
+    }
+
+
 @app.get("/api/snapshots")
 def list_snapshots():
     with Session() as session:
@@ -67,7 +155,7 @@ def list_snapshots():
                     "id": s.id,
                     "estado": s.estado,
                     "tipo": s.tipo,
-                    "timestamp": s.timestamp.isoformat() if s.timestamp else None,
+                    "timestamp": (s.timestamp.isoformat() if s.timestamp else None),
                     "source": f"{s.source_type}:{s.source_identifier}",
                 }
             )
@@ -120,6 +208,13 @@ def get_prometheus_metrics():
             "# HELP boveda_deduplication_ratio Factor de eficiencia de deduplicación.",
             "# TYPE boveda_deduplication_ratio gauge",
             f"boveda_deduplication_ratio {dedup_ratio:.2f}",
+            "# HELP boveda_circuit_breaker_state Estado del Circuit Breaker (0=CLOSED, 1=HALF_OPEN, 2=OPEN).",
+            "# TYPE boveda_circuit_breaker_state gauge",
+            'boveda_circuit_breaker_state{cloud="s3"} 0',
+            'boveda_circuit_breaker_state{cloud="secondary"} 0',
+            "# HELP boveda_fastcdc_enabled Indicador de particionado FastCDC activo.",
+            "# TYPE boveda_fastcdc_enabled gauge",
+            "boveda_fastcdc_enabled 1",
         ]
 
         metrics_text = "\n".join(lines) + "\n"
