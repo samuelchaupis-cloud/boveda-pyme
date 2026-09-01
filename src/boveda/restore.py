@@ -91,4 +91,3 @@ def restore_snapshot(
         dctx.write(plaintext)
 
     dctx.flush()
-
